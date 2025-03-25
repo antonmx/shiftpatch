@@ -396,7 +396,7 @@ class ManyShiftedPairs :
     def __getitem__(self, index=None):
 
         if type(index) is tuple and len(index) == 4 :
-            return self.pairs[index[0]].__getitem__(*index[1:])[0], index
+            return self.pairs[index[0]].__getitem__(index[1:])[0], index
         elif type(index) is int :
             if index >= self.__len__() :
                 raise Exception(f"Index {index} is out of range for collection of length {self.__len__()}.")
@@ -510,7 +510,7 @@ def showMe(tSet, item=None) :
     elif isinstance(item, int) :
         image = refImages[0,...]
     else :
-        image, _,_ = tSet.__getitem__(*item)
+        image, _ = tSet.__getitem__(item)
     image = image.squeeze()
     plotImages( [image[0].cpu(), image[2].cpu(), image[4].cpu()] )
     plotImages( [image[1].cpu(), image[3].cpu(), image[5].cpu()] )
