@@ -880,9 +880,7 @@ def summarizeSet(dataloader):
             masks = images[:,2:,...]
             for i in range(TCfg.batchSplit) :
                 subRange = np.s_[i*subBatchSize:(i+1)*subBatchSize] if TCfg.batchSplit > 1 else np.s_[:]
-                procImages = images[subRange,0:4,...].clone().detach()
-                procImages[:,0,...] *= masks[subRange,0,...]
-                procImages[:,1,...] *= masks[subRange,1,...]
+                procImages = imagesPreProc(images[subRange,...])[0]
                 fakeImages[subRange,...] = generator.forward((procImages,None))
                 if not noAdv :
                     pass
@@ -958,9 +956,7 @@ def testMe(tSet, item=None, plotMe=True) :
     generator.eval()
     with torch.no_grad() :
         masks = images[:,2:,...]
-        procImages = images[:,0:4,...].clone().detach()
-        procImages[:,0,...] *= masks[:,0,...]
-        procImages[:,1,...] *= masks[:,1,...]
+        procImages = imagesPreProc(images)[0]
         generatedImages = generator.forward( (procImages, None) )
         totalPixels = pixelsCounted(masks)
         MSE_diff , L1L_diff , Rec_diff = \
@@ -1122,7 +1118,11 @@ def calculateNorm(images) :
 
 
 def imagesPreProc(images) :
-    return images, None
+    with torch.no_grad() :
+        procImages = images[:,0:4,...].clone().detach()
+        procImages[:,0,...] *= images[:,2,...]
+        procImages[:,1,...] *= images[:,3,...]
+    return procImages, None
 
 def imagesPostProc(images, procData=None) :
     return images
@@ -1301,13 +1301,8 @@ def train_step(images):
     optimizer_G.zero_grad()
     for i in range(TCfg.batchSplit) :
         subRange = np.s_[i*subBatchSize:(i+1)*subBatchSize] if TCfg.batchSplit > 1 else np.s_[:]
-        with torch.no_grad() :
-            masks = images[subRange,2:,...]
-            procImages = images[subRange,0:4,...].clone().detach()
-            procImages[:,0,...] *= masks[:,0,...]
-            procImages[:,1,...] *= masks[:,1,...]
-        procImages.requires_grad_(True)
-        masks.requires_grad_(True)
+        masks = images[subRange,2:,...]
+        procImages = imagesPreProc(images[subRange,...])[0]
         subFakeImages = generator.forward((procImages,None))
         if noAdv :
             subG_loss = loss_Rec( images[subRange,0:2,...], subFakeImages, masks)
