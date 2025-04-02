@@ -291,6 +291,45 @@ class SamplingMask :
 samplingMask = initIfNew('samplingMask')
 
 
+class SamplingVariations :
+    def __init__(self, amplitude=0.2):
+        self.amplitude = amplitude
+        self.bgvar = loadImage("BGvariations.tif")
+        mn = self.bgvar.min()
+        mx = self.bgvar.max()
+        if mn < mx :
+            self.bgvar = 2 * (self.bgvar - mn) / (mx - mn) - 1
+        else :
+            self.bgvar = 0
+        self.samplingShape = (self.bgvar.shape[0] - DCfg.inShape[0],
+                              self.bgvar.shape[1] - DCfg.inShape[1])
+    def __len__(self) :
+        return math.prod(self.samplingShape)
+    def __getitem__(self, index=None) :
+        constFactor = self.getConstComponent( random.randint(0, self.__len__()-1) \
+                                              if index is None else hashAnObject(index) )
+        if index is None :
+            index = random.randint(0, self.__len__()-1) % self.__len__()
+        idx = divmod( index % self.__len__(), self.samplingShape[1] ) \
+              if isinstance(index, int) else index
+        vari = self.bgvar[idx[0]:idx[0]+DCfg.inShape[-2],
+                          idx[1]:idx[1]+DCfg.inShape[-1]]
+        return constFactor * (1+vari*self.amplitude)
+    def getConstComponent(self, index=None) :
+        if index is None :
+            index = random.randint(0, self.__len__()-1)
+            return self.getConstComponent(index)
+        else :
+            index = index % self.__len__()
+        rat = 2 * index / self.__len__() - 1 # [-1,1]
+        return 2 ** rat # [1/2,2]
+
+
+samplingVari = initIfNew('samplingVari')
+
+
+
+
 def hdfData(inputString):
     nameSplit = inputString.split(':')
     if len(nameSplit) != 2 :
@@ -383,11 +422,14 @@ class ShiftedPair :
         range = np.s_[ydx:ydx+DCfg.inShape[-2], xdx:xdx+DCfg.inShape[-1]]
         orgSubMask = self.orgMask[range]
         sftSubMask = self.sftMask[range]
-        orgTrainMask = samplingMask.__getitem__( None   if self.randomMask else \
-                                                 hashAnObject( (0, self.prehash, zdx, ydx, xdx) ) )
-        sftTrainMask = samplingMask.__getitem__( None   if self.randomMask else \
-                                                 hashAnObject( (1, self.prehash, zdx, ydx, xdx) ) )
-        data = np.stack([ self.orgData[zdx, *range], self.sftData[zdx, *range],
+        hashOrg = hashAnObject( (0, self.prehash, zdx, ydx, xdx) )
+        hashSft = hashAnObject( (1, self.prehash, zdx, ydx, xdx) )
+        orgTrainMask = samplingMask.__getitem__( None if self.randomMask else hashOrg )
+        sftTrainMask = samplingMask.__getitem__( None if self.randomMask else hashSft )
+        orgTrainVari = samplingMask.__getitem__( None if self.randomMask else hashOrg )
+        sftTrainVari = samplingMask.__getitem__( None if self.randomMask else hashSft )
+        data = np.stack([ self.orgData[zdx, *range] * orgTrainVari,
+                          self.sftData[zdx, *range] * sftTrainVari,
                           orgSubMask * orgTrainMask, sftSubMask * sftTrainMask,
                           orgSubMask, sftSubMask ])
         return data, (zdx, int(ydx), int(xdx))
@@ -1291,8 +1333,7 @@ def train_step(images):
     with torch.no_grad() :
 
         masks = images[:,2:,...]
-        totalPixels = pixelsCounted(masks)
-        trainRes.nofPixels = totalPixels
+        trainRes.nofPixels = pixelsCounted(masks)
         trainRes.nofImages = nofIm
         trainRes.lossMSE = loss_MSE( images[:,0:2,...], fakeImages, masks ).item()
         trainRes.lossL1L = loss_L1L( images[:,0:2,...], fakeImages, masks ).item()
@@ -1412,10 +1453,10 @@ def train(savedCheckPoint):
                 addImage(3,1, createTrimage(refImages[0,...],1))
                 addImage(4,0, stretchSimm=True, img =
                               ( refRes[4][0,0,...] - refImages[0,0,...] ) * \
-                              (1-refImages[0,2,...]) * refImages[0,3,...]  )
+                              (1-refImages[0,2,...]) * refImages[0,3,...] * refImages[0,4,...]  )
                 addImage(4,1, stretchSimm=True, img =
                               ( refRes[4][0,1,...] - refImages[0,1,...] ) * \
-                              (1-refImages[0,3,...]) * refImages[0,2,...]  )
+                              (1-refImages[0,3,...]) * refImages[0,2,...] * refImages[0,5,...] )
                 normalizedLosses = updAcc * (1/updAcc.nofPixels if updAcc.nofPixels else 0)
                 #writer.add_scalars("Losses per iter",
                 #                   {'Dis': trainRes.lossD
@@ -1440,7 +1481,7 @@ def train(savedCheckPoint):
                       f" L1L: {normalizedLosses.lossL1L / normMSE :.3f} " +
                       f" MSE: {normalizedLosses.lossMSE / normL1L :.3f} " +
                       f" Rec: {normalizedLosses.lossRec / normRec :.3f} " +
-                      f" (Train: {lastRec_train:.3f}/{minRecTrain:.3f}, Test: {lastRec_test:.3f}/{minRecTest:.3f})."
+                      f" (Train: {lastRec_train:.3e}/{minRecTrain:.3e}, Test: {lastRec_test:.3e}/{minRecTest:.3e})."
                       )
                 indexInSet = [ indColumn[rndIdx].item() for indColumn in indecies ]
                 print(f"Image {indexInSet}." +
@@ -1476,7 +1517,8 @@ def train(savedCheckPoint):
                 saveModels(f"model_{TCfg.exec}_hourly")
 
 
-        lastRec_train = resAcc.lossRec *  ( 1/resAcc.nofPixels if resAcc.nofPixels else 0 )
+        resAcc *=  (1/resAcc.nofPixels) if resAcc.nofPixels else 0
+        lastRec_train = resAcc.lossRec
         if not minRecTrain or lastRec_train < minRecTrain :
             minRecTrain = lastRec_train
         writer.add_scalars("Distances per epoch",
@@ -1494,10 +1536,7 @@ def train(savedCheckPoint):
         #                   ,'Gen': resAcc.predFake
         #                   ,'Pre': resAcc.predPre
         #                   }, epoch )
-        Rec_test, MSE_test, L1L_test,\
-            Rprob_test, Fprob_test, \
-                Dloss_test, GAloss_test, GDloss_test \
-                    = summarizeSet(testLoader)
+        Rec_test, MSE_test, L1L_test = summarizeSet(testLoader)[0:3]
         writer.add_scalars("Test per epoch",
                            {'MSE': MSE_test / normTestMSE
                            ,'L1L': L1L_test / normTestL1L
