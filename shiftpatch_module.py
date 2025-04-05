@@ -45,6 +45,7 @@ class TCfgClass:
     exec : int
     latentDim: int
     batchSize: int
+    loaderWorkers : int
     labelSmoothFac: float
     learningRateD: float
     learningRateG: float
@@ -53,6 +54,7 @@ class TCfgClass:
     nofEpochs: int = 0
     historyHDF : str = field(repr = True, init = False)
     logDir : str = field(repr = True, init = False)
+    maximumArtificialShift : int = 4
     def __post_init__(self):
         if self.device == torch.device('cpu')  :
             self.device = torch.device(f"cuda:{self.exec}")
@@ -287,7 +289,6 @@ class SamplingMask :
             index = index % self.__len__()
         idx = self.indicies[index]
         return self.mask[idx[0]:idx[0]+DCfg.inShape[-2], idx[1]:idx[1]+DCfg.inShape[-1]]
-
 samplingMask = initIfNew('samplingMask')
 
 
@@ -323,8 +324,6 @@ class SamplingVariations :
             index = index % self.__len__()
         rat = 2 * index / self.__len__() - 1 # [-1,1]
         return 2 ** rat # [1/2,2]
-
-
 samplingVari = initIfNew('samplingVari')
 
 
@@ -358,7 +357,7 @@ def hashAnObject(object) :
 
 class ShiftedPair :
 
-    def __init__(self, orgVol, sftVol, orgMask=None, sftMask=None, randomMask=False) :
+    def __init__(self, orgVol, sftVol, orgMask=None, sftMask=None, randomize=False) :
         self.orgData = hdfData(orgVol)
         self.shape = self.orgData.shape
         self.face = self.shape[1:]
@@ -381,58 +380,65 @@ class ShiftedPair :
             imask = fn.conv2d(torch.from_numpy(mask)[None, None,...],
                               torch.ones((1, 1,*DCfg.inShape))) [0,0,...].numpy() \
                                                                 / math.prod(DCfg.inShape)
+            # next is to allow for artificial shift
+            imask[0:TCfg.maximumArtificialShift, ...] = 0
+            imask[-1-TCfg.maximumArtificialShift:, ...] = 0
+            imask[...,0:TCfg.maximumArtificialShift] = 0
+            imask[...,-1-TCfg.maximumArtificialShift:] = 0
             return mask, imask
         self.orgMask, self.orgImask = cookMask(orgMask)
         self.sftMask, self.sftImask = cookMask(sftMask)
         self.iFace = self.orgImask.shape
         self.goodForTraining = np.argwhere( np.logical_or(self.orgImask > 0.75,
-                                                          self.sftImask > 0.75) ).astype(int)
+                                                          self.sftImask > 0.75) )
+
+
         self.prehash = hashAnObject((orgVol, sftVol, orgMask, sftMask))
-        self.randomMask = randomMask
+        self.randomize = randomize
 
 
     def __len__(self):
-        return len(self.goodForTraining) * self.imgs
+        return self.goodForTraining.shape[0] * self.imgs
 
 
     def __getitem__(self, index=None) :
-        if type(index) is tuple and len(index) == 3 :
+        if isinstance(index, tuple) and len(index) == 3 :
             zdx, ydx, xdx = index
-        elif type(index) is int :
+        elif isinstance(index, int) :
             if index >= self.__len__() :
                 raise Exception(f"Index {index} is out of range for shifted pair"
                                 f" of size {self.__len__()}.")
-            zdx = index // len(self.goodForTraining)
-            ydx, xdx = self.goodForTraining[ index % len(self.goodForTraining) ]
+            zdx, pos = divmod(index, self.goodForTraining.shape[0])
+            ydx, xdx = self.goodForTraining[ pos, : ]
         elif index is None :
             zdx = random.randint(0,self.imgs-1)
-            ydx, xdx = self.goodForTraining[ random.randint(0,len(self.goodForTraining)-1) ]
-            #while True:
-            #    ydx = random.randint(0,self.iFace[-2]-1)
-            #    xdx = random.randint(0,self.iFace[-1]-1)
-            #    range = np.s_[ydx:ydx+DCfg.inShape[-2], xdx:xdx+DCfg.inShape[-1]]
-            #    orgSubMask = self.orgMask[range]
-            #    sftSubMask = self.sftMask[range]
-            #    if self.orgIMask[ydx,xdx] > 0.75 and \
-            #       self.sftIMask[ydx,xdx] > 0.75 and \
-            #       np.count_nonzero(orgSubMask + sftSubMask) / math.prod(DCfg.inShape) > 0.5 :
-            #        break
+            ydx, xdx = self.goodForTraining[ random.randint(0, self.goodForTraining.shape[0]-1) ]
         else :
             raise Exception(f"Bad index type {type(index)} {index} shifted pair.")
-        range = np.s_[ydx:ydx+DCfg.inShape[-2], xdx:xdx+DCfg.inShape[-1]]
+        zdx, ydx, xdx = int(zdx), int(ydx), int(xdx) # to make sure hashes are same irrespectively of those variable types
+        hashOrg = None if self.randomize else hashAnObject( (0, self.prehash, zdx, ydx, xdx) )
+        hashSft = None if self.randomize else hashAnObject( (1, self.prehash, zdx, ydx, xdx) )
+        xShift = random.randint(-TCfg.maximumArtificialShift, TCfg.maximumArtificialShift) \
+                    if self.randomize else \
+                 hashOrg % (2*TCfg.maximumArtificialShift+1) - TCfg.maximumArtificialShift
+        yShift = random.randint(-TCfg.maximumArtificialShift, TCfg.maximumArtificialShift) \
+                    if self.randomize else \
+                 hashSft % (2*TCfg.maximumArtificialShift+1) - TCfg.maximumArtificialShift
+        range = np.s_[ydx:ydx+DCfg.inShape[-2],
+                      xdx:xdx+DCfg.inShape[-1]]
+        shiftedRange = np.s_[ydx+yShift:ydx+yShift+DCfg.inShape[-2],
+                             xdx+xShift:xdx+xShift+DCfg.inShape[-1]]
         orgSubMask = self.orgMask[range]
-        sftSubMask = self.sftMask[range]
-        hashOrg = hashAnObject( (0, self.prehash, zdx, ydx, xdx) )
-        hashSft = hashAnObject( (1, self.prehash, zdx, ydx, xdx) )
-        orgTrainMask = samplingMask.__getitem__( None if self.randomMask else hashOrg )
-        sftTrainMask = samplingMask.__getitem__( None if self.randomMask else hashSft )
-        orgTrainVari = samplingMask.__getitem__( None if self.randomMask else hashOrg )
-        sftTrainVari = samplingMask.__getitem__( None if self.randomMask else hashSft )
+        sftSubMask = self.sftMask[shiftedRange]
+        orgTrainMask = samplingMask[hashOrg]
+        sftTrainMask = samplingMask[hashSft]
+        orgTrainVari = samplingVari[hashOrg]
+        sftTrainVari = samplingVari[hashSft]
         data = np.stack([ self.orgData[zdx, *range] * orgTrainVari,
-                          self.sftData[zdx, *range] * sftTrainVari,
+                          self.sftData[zdx, *shiftedRange] * sftTrainVari,
                           orgSubMask * orgTrainMask, sftSubMask * sftTrainMask,
                           orgSubMask, sftSubMask ])
-        return data, (zdx, int(ydx), int(xdx))
+        return data, (zdx, ydx, xdx)
 
 
     def masks(self) :
@@ -442,20 +448,20 @@ class ShiftedPair :
 
 class ManyShiftedPairs :
 
-    def __init__(self, listOfPairs, randomMask=False) :
+    def __init__(self, listOfPairs, randomize=False) :
         self.pairs = []
         for pair in listOfPairs :
-            self.pairs.append(ShiftedPair(*pair, randomMask=randomMask))
-        self.randomMask=randomMask
+            self.pairs.append(ShiftedPair(*pair, randomize=randomize))
+        self.randomize=randomize
 
     def __len__(self):
         return sum( [ len(pair) for pair in self.pairs ] )
 
     def __getitem__(self, index=None):
 
-        if type(index) is tuple and len(index) == 4 :
+        if isinstance(index, tuple) and len(index) == 4 :
             return self.pairs[index[0]].__getitem__(index[1:])[0], index
-        elif type(index) is int :
+        elif isinstance(index, int) :
             if index >= self.__len__() :
                 raise Exception(f"Index {index} is out of range for collection of length {self.__len__()}.")
             tail = index
@@ -476,27 +482,29 @@ class ManyShiftedPairs :
         class InputFromPairs(torch.utils.data.Dataset) :
             def __init__(self, root, transform=None):
                 self.container = root
-                #self.oblTransform = transforms.Compose( [ transforms.ToTensor() ] )
                 self.transform = transform
             def __len__(self):
-                #return self.container.__len__()
-                # some reasonable estimation of dataset size to
-                # give to the dataloader
-                return sum( [ pair.imgs * len(pair.goodForTraining) // math.prod(DCfg.inShape) \
-                    for pair in self.container.pairs ] )
+                return sum( [ len(pair) for pair in self.container.pairs ] )
             def __getitem__(self, index=None, doTransform=True):
-                # integer index will replace it with a random one
-                # to allow random access with no shuffle on the dataloader
-                # level which takes enormous amount of time on large datasets.
-                if isinstance(index, int) and self.container.randomMask :
-                    index = random.randint(0,self.__len__()-1)
-                data, index = self.container.__getitem__(index)
-                #data = self.oblTransform(data)
+                data, index = self.container.__getitem__(index) \
+                    if index is None or isinstance(index, tuple) else \
+                        self.container[int(index)]
                 data = torch.tensor(data)
                 if doTransform and self.transform :
                     data = self.transform(data)
                 return (data, index)
-
+            def flatIndex(index) :
+                idx = 0
+                pair = None
+                for curPair in range(index[0]) :
+                    pair = self.container.pairs[curPair]
+                    idx += len(pair)
+                idx += pair.imgs * index[1]
+                item = 0
+                for item in range(pair.goodForTraining.shape[0]) :
+                    if np.all( pair.goodForTraining[item,:] == index[2:] ) :
+                        return idx + item
+                return None # not found
 
         return InputFromPairs(self, transform)
 
@@ -528,51 +536,59 @@ TrainShiftedPairs = [ [ dataRoot + prefix + postfix
                          for prefix in [ "02_dir", "02_flp",
                                          "03_dir", "03_flp" ] ]
 examples = [
-    (1, 967, 81, 388),
-    (1, 557, 51, 1615),
-    (1, 1109, 543, 225),
-    (1, 833, 21, 539),
+    (1, 924, 315, 1580),
+    (1, 534, 733, 1298),
+    (1, 744, 23, 23),
+    (1, 772, 121, 1750)
 ]
 
 dataMeanNorm = (0.5,0.5,0,0,0,0) # masks not to be normalized
 
-def createTrainSet() :
-    setRoot = ManyShiftedPairs(TrainShiftedPairs, randomMask=True)
-    mytransforms = transforms.Compose([
+
+def createSet( pairs, randomize) :
+    setRoot = ManyShiftedPairs(pairs, randomize=randomize)
+    mytransforms = \
+        transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(),
-            transforms.Normalize(mean=dataMeanNorm, std=(1))
-    ])
+            transforms.Normalize(mean=dataMeanNorm, std=(1)), ]) \
+        if randomize else \
+        transforms.Compose([
+            transforms.Normalize(mean=dataMeanNorm, std=(1)) ])
     return setRoot.get_dataset(mytransforms)
 
+def createTrainSet() :
+    return createSet(TrainShiftedPairs, True)
+trainSet = initIfNew('trainSet')
 
 def createTestSet() :
-    setRoot = ManyShiftedPairs(TestShiftedPairs)
-    mytransforms = transforms.Compose([
-            transforms.Normalize(mean=dataMeanNorm, std=(1))
-    ])
-    return setRoot.get_dataset(mytransforms)
+    return createSet(TestShiftedPairs, False)
+testSet = initIfNew('testSet')
 
-
+def createSubSet(tSet, subSetSize=None) :
+    if subSetSize is None :
+        subSetSize = len(tSet) // math.prod(DCfg.inShape)
+    subset_indices = \
+        torch.randint( 0, len(tSet), (subSetSize,) ) \
+            if tSet.container.randomize else \
+        torch.tensor( [ hashAnObject(idx) % len(tSet) for idx in range (subSetSize) ]  )
+    return torch.utils.data.Subset(tSet, subset_indices)
 
 def createDataLoader(tSet, num_workers=os.cpu_count()) :
     return torch.utils.data.DataLoader(
         dataset=tSet,
         batch_size=TCfg.batchSize,
-        shuffle=False,
+        shuffle=False, # no need to shuffle because already don when creating subsets
         num_workers=num_workers,
         drop_last=True
     )
 
-def createReferences(tSet, toShow = 0) :
+
+def createReferences(toShow = 0) :
     global examples
     if toShow :
         examples.insert(0, examples.pop(toShow))
-    mytransforms = transforms.Compose([
-            transforms.Normalize(mean=dataMeanNorm, std=(1))
-    ])
-    refImages = torch.stack( [ mytransforms(tSet.__getitem__(ex, doTransform=False)[0])
-                               for ex in examples ] ).to(TCfg.device)
+    refImages = torch.stack( [ testSet.__getitem__(ex)[0] for ex in examples ] ).to(TCfg.device)
     refNoises = torch.randn((refImages.shape[0],TCfg.latentDim)).to(TCfg.device)
     return refImages, refNoises
 refImages = initIfNew('refImages')
@@ -594,9 +610,11 @@ def showMe(tSet, item=None) :
         image = refImages[item,...]
     else :
         image, _ = tSet.__getitem__(item)
+    trImage = createTrimage(image)
     image = image.squeeze()
-    plotImages( [image[0].cpu(), image[2].cpu(), image[4].cpu()] )
-    plotImages( [image[1].cpu(), image[3].cpu(), image[5].cpu()] )
+    plotImages( [image[0].cpu(), image[1].cpu(), trImage[0].cpu(), trImage[1].cpu()] )
+    #plotImages( [image[0].cpu(), image[2].cpu(), image[4].cpu()] )
+    #plotImages( [image[1].cpu(), image[3].cpu(), image[5].cpu()] )
     image = image.to(TCfg.device)
 
 
@@ -615,10 +633,11 @@ class GeneratorTemplate(nn.Module):
     def createLatent(self) :
         if self.latentChannels == 0 :
             return None
+        realLatent = abs(self.latentChannels)
         toRet =  nn.Sequential(
-            nn.Linear(TCfg.latentDim, self.sinoSize*self.latentChannels),
+            nn.Linear(TCfg.latentDim, math.prod(DCfg.inShape) * realLatent),
             nn.ReLU(),
-            nn.Unflatten( 1, (self.latentChannels,) + self.sinoSh )
+            nn.Unflatten( 1, (realLatent,) + DCfg.inShape )
         )
         fillWheights(toRet)
         return toRet
@@ -657,7 +676,7 @@ class GeneratorTemplate(nn.Module):
 
 
     def createFClink(self) :
-        smpl = torch.zeros((1, 4+self.latentChannels, *DCfg.inShape))
+        smpl = torch.zeros((1, 4+abs(self.latentChannels), *DCfg.inShape))
         with torch.no_grad() :
             for encoder in self.encoders :
                 smpl = encoder(smpl)
@@ -710,7 +729,9 @@ class GeneratorTemplate(nn.Module):
         modelIn = images.clone().detach()
 
         if self.latentChannels :
-            latent = self.noise2latent(noises)
+            latent = self.noise2latent(noises) \
+                if self.latentChannels > 0 else \
+                     torch.zeros( images.shape[0], -self.latentChannels, *DCfg.inShape).to(TCfg.device)
             dwTrain = [torch.cat((modelIn, latent), dim=1),]
         else :
             dwTrain = [modelIn,]
@@ -856,6 +877,19 @@ def loss_Gen(y_true, y_pred, p_true, p_pred):
     return lossAdv, lossDif
 
 
+
+
+def imagesPreProc(images) :
+    with torch.no_grad() :
+        procImages = images[:,0:4,...].clone().detach()
+        procImages[:,0,...] *= images[:,2,...]
+        procImages[:,1,...] *= images[:,3,...]
+    return procImages, None
+
+def imagesPostProc(images, procData=None) :
+    return images
+
+
 def summarizeSet(dataloader):
 
     MSE_diff, L1L_diff, Rec_diff = 0, 0, 0 #[], [], []
@@ -952,31 +986,36 @@ def testMe(tSet, item=None, plotMe=True) :
     orgDim = images.dim()
     if orgDim == 3 :
         images = images.unsqueeze(0)
-
+    generatedImages = torch.empty_like(images)
     generator.eval()
     with torch.no_grad() :
         masks = images[:,2:,...]
         procImages = imagesPreProc(images)[0]
-        generatedImages = generator.forward( (procImages, None) )
+        generatedImages[:,0:2,...] = generator.forward( (procImages, None) )
         totalPixels = pixelsCounted(masks)
         MSE_diff , L1L_diff , Rec_diff = \
-            ( loss_func( images[:,0:2,...], generatedImages, masks ).item() * (1/totalPixels if totalPixels else 0) \
-                for loss_func in [loss_MSE, loss_L1L, loss_Rec ] )
+            ( loss_func( images[:,0:2,...], generatedImages[:,0:2,...], masks ).item() * \
+                (1/totalPixels if totalPixels else 0) \
+                    for loss_func in [loss_MSE, loss_L1L, loss_Rec ] )
         mn = torch.where( masks[:,0:2,...] > 0 , images[:,0:2,...], images.max() ).amin(dim=(2,3))
-        generatedImages = masks[:,0:2,...] * images[:,0:2,...] + \
+        generatedImages[:,0:2,...] = masks[:,0:2,...] * images[:,0:2,...] + \
                           ( 1-masks[:,0:2,...] ) * \
-                          ( masks[:,[1,0],...] * generatedImages + \
+                          ( masks[:,[1,0],...] * generatedImages[:,0:2,...] + \
                             ( 1 - masks[:,[1,0],...] )  * mn[:,:,None,None] )
+        generatedImages[:,2:4,...] = torch.where( (masks[:,[0],...] + masks[:,[1],...]) > 0,
+                                                  procImages[:,0:2,...], mn[:,:,None,None] )
     images = images.cpu()
     if plotMe :
-        print(f"Losses: MSE {MSE_diff}, L1L {L1L_diff}, Rec {Rec_diff}. Pixels: {totalPixels}.")
+        print(f"Losses: Rec {Rec_diff}, MSE {MSE_diff}, L1L {L1L_diff}. Pixels: {totalPixels}.")
         for idx in range(images.shape[0]) :
             trImages = createTrimage(images[idx,...])
-            plotImages( [generatedImages[idx,0].cpu(), images[idx,0], trImages[0,...], images[idx,4]] )
-            plotImages( [generatedImages[idx,1].cpu(), images[idx,1], trImages[1,...], images[idx,5]] )
+            plotImages( [generatedImages[idx,0].cpu(), generatedImages[idx,2].cpu(),
+                         trImages[0,...], images[idx,0] ] )
+            plotImages( [generatedImages[idx,1].cpu(), generatedImages[idx,3].cpu(),
+                         trImages[1,...], images[idx,1] ] )
     if orgDim == 3 :
         generatedImages = generatedImages.squeeze(0)
-    return MSE_diff , L1L_diff , Rec_diff, totalPixels, generatedImages
+    return generatedImages, totalPixels, (Rec_diff, MSE_diff, L1L_diff)
 
 [
 #def generateDiffImages(images, layout=None) :
@@ -1116,18 +1155,6 @@ def calculateNorm(images) :
     return 2 / ( 1 + mean2 + 1e-5 ) # to denorm and adjust for mean
 
 
-
-def imagesPreProc(images) :
-    with torch.no_grad() :
-        procImages = images[:,0:4,...].clone().detach()
-        procImages[:,0,...] *= images[:,2,...]
-        procImages[:,1,...] *= images[:,3,...]
-    return procImages, None
-
-def imagesPostProc(images, procData=None) :
-    return images
-
-
 @dataclass
 class TrainResClass:
     lossD : any = 0
@@ -1213,6 +1240,9 @@ def loadCheckPoint(path, generator, discriminator,
 normMSE=1
 normL1L=1
 normRec=1
+normMSE_N=1
+normL1L_N=1
+normRec_N=1
 skipDis = False
 
 def restoreCheckpoint(path=None, logDir=None) :
@@ -1347,16 +1377,16 @@ def train_step(images):
 
 
 
-def beforeEachEpoch(epoch) :
+def beforeEachEpoch(herelocals) :
     return
 
-def afterEachEpoch(epoch) :
+def afterEachEpoch(herelocals) :
     return
 
-def beforeReport() :
+def beforeReport(herelocals) :
     return
 
-def afterReport() :
+def afterReport(herelocals) :
     return
 
 epoch=initIfNew('epoch', 0)
@@ -1369,6 +1399,9 @@ startFrom = initIfNew('startFrom', 0)
 normTestMSE=1
 normTestL1L=1
 normTestRec=1
+normTestMSE_N=1
+normTestL1L_N=1
+normTestRec_N=1
 normTestDis=1
 normTestGen=1
 normTestGDloss=1
@@ -1391,7 +1424,9 @@ def train(savedCheckPoint):
 
     while TCfg.nofEpochs is None or epoch <= TCfg.nofEpochs :
         epoch += 1
-        beforeEachEpoch(epoch)
+        beforeEachEpoch(locals())
+        dataLoader = createDataLoader(createSubSet(trainSet), num_workers=TCfg.loaderWorkers)
+
         generator.train()
         discriminator.train()
         resAcc = TrainResClass()
@@ -1438,20 +1473,22 @@ def train(savedCheckPoint):
                     showMe[ row  * ( DCfg.inShape[1]+imGap) : (row+1 ) * DCfg.inShape[1] + row  * imGap ,
                             clmn * ( DCfg.inShape[0]+imGap) : (clmn+1) * DCfg.inShape[0] + clmn * imGap ] = \
                         imgToAdd.cpu().numpy()
-                addImage(0,0, rndRes[4][0,...])
-                addImage(0,1, rndRes[4][1,...])
-                addImage(1,0, createTrimage(rndInp, 0))
-                addImage(1,1, createTrimage(rndInp, 1))
-                addImage(2,0, refRes[4][0,0,...])
-                addImage(2,1, refRes[4][0,1,...])
-                addImage(3,0, createTrimage(refImages[0,...],0))
-                addImage(3,1, createTrimage(refImages[0,...],1))
-                addImage(4,0, stretchSimm=True, img =
-                              ( refRes[4][0,0,...] - refImages[0,0,...] ) * \
-                              (1-refImages[0,2,...]) * refImages[0,3,...] * refImages[0,4,...]  )
-                addImage(4,1, stretchSimm=True, img =
-                              ( refRes[4][0,1,...] - refImages[0,1,...] ) * \
-                              (1-refImages[0,3,...]) * refImages[0,2,...] * refImages[0,5,...] )
+                addImage(0,0, rndRes[0][0,...])
+                addImage(0,1, rndRes[0][1,...])
+                addImage(1,0, rndRes[0][2,...]) #createTrimage(rndInp, 0))
+                addImage(1,1, rndRes[0][3,...]) #createTrimage(rndInp, 1))
+                addImage(2,0, refRes[0][0,0,...])
+                addImage(2,1, refRes[0][0,1,...])
+                addImage(3,0, refRes[0][0,2,...])
+                addImage(3,1, refRes[0][0,3,...])
+                addImage(4,0, createTrimage(refImages[0,...],0))
+                addImage(4,1, createTrimage(refImages[0,...],1))
+                #addImage(4,0, stretchSimm=True, img =
+                #              ( refRes[0][0,0,...] - refImages[0,0,...] ) * \
+                #              (1-refImages[0,2,...]) * refImages[0,3,...] * refImages[0,4,...]  )
+                #addImage(4,1, stretchSimm=True, img =
+                #              ( refRes[0][0,1,...] - refImages[0,1,...] ) * \
+                #              (1-refImages[0,3,...]) * refImages[0,2,...] * refImages[0,5,...] )
                 normalizedLosses = updAcc * (1/updAcc.nofPixels if updAcc.nofPixels else 0)
                 #writer.add_scalars("Losses per iter",
                 #                   {'Dis': trainRes.lossD
@@ -1471,23 +1508,24 @@ def train(savedCheckPoint):
                 #                   }, imer )
 
                 IPython.display.clear_output(wait=True)
-                beforeReport()
+                beforeReport(locals())
                 print(f"Epoch: {epoch:3} ({minTestEpoch:3})." +
-                      f" L1L: {normalizedLosses.lossL1L / normMSE :.3f} " +
-                      f" MSE: {normalizedLosses.lossMSE / normL1L :.3f} " +
+                      f" L1L: {normalizedLosses.lossL1L / normL1L :.3f} " +
+                      f" MSE: {normalizedLosses.lossMSE / normMSE :.3f} " +
                       f" Rec: {normalizedLosses.lossRec / normRec :.3f} " +
-                      f" (Train: {lastRec_train:.3e}/{minRecTrain:.3e}, Test: {lastRec_test:.3e}/{minRecTest:.3e})."
+                      f" (Train: {lastRec_train/normRec:.3f}/{minRecTrain/normRec:.3f},"
+                      f" Test: {lastRec_test/normTestRec:.3f}/{minRecTest/normTestRec:.3f})."
                       )
                 indexInSet = [ indColumn[rndIdx].item() for indColumn in indecies ]
                 print(f"Image {indexInSet}." +
-                      f" L1L: {rndRes[0] / normMSE :.3f} " +
-                      f" MSE: {rndRes[1] / normL1L :.3f} " +
-                      f" Rec: {rndRes[2] / normRec :.3f} "
+                      f" L1L: {rndRes[2][2] / normL1L :.3f} " +
+                      f" MSE: {rndRes[2][1] / normMSE :.3f} " +
+                      f" Rec: {rndRes[2][0] / normRec :.3f} "
                       )
                 print(f"Reference images." +
-                      f" L1L: {refRes[0] / normMSE:.3f} " +
-                      f" MSE: {refRes[1] / normL1L:.3f} " +
-                      f" Rec: {refRes[2] / normRec:.3f} "
+                      f" L1L: {refRes[2][2] / normL1L:.3f} " +
+                      f" MSE: {refRes[2][1] / normMSE:.3f} " +
+                      f" Rec: {refRes[2][0] / normRec:.3f} "
                       )
                 #print (f"TT: {trainInfo.bestRealProb:.2f},  "
                 #       f"FT: {trainInfo.bestFakeProb:.2f},  "
@@ -1499,7 +1537,7 @@ def train(savedCheckPoint):
                 #       f"R : {probsR[0,0].item():.3f}." )
                 plotImage(showMe)
                 addToHDF(TCfg.historyHDF, "data", showMe)
-                afterReport()
+                afterReport(locals())
                 updAcc = TrainResClass()
 
             if time.time() - lastSaveTime > 3600 :
@@ -1531,6 +1569,7 @@ def train(savedCheckPoint):
         #                   ,'Gen': resAcc.predFake
         #                   ,'Pre': resAcc.predPre
         #                   }, epoch )
+        _ = testMe(refImages)
         Rec_test, MSE_test, L1L_test = summarizeSet(testLoader)[0:3]
         writer.add_scalars("Test per epoch",
                            {'MSE': MSE_test / normTestMSE
@@ -1567,8 +1606,8 @@ def train(savedCheckPoint):
                            optimizer_G, optimizer_D)
         saveModels()
 
+        afterEachEpoch(locals())
         resAcc = TrainResClass()
-        afterEachEpoch(epoch)
 
 
 
