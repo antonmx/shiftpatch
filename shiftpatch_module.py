@@ -433,7 +433,7 @@ class ShiftedPair :
             raise Exception(f"Bad index type {type(index)} {index} shifted pair.")
         zdx, ydx, xdx = int(zdx), int(ydx), int(xdx) # to make sure hashes are same irrespectively of those variable types
         hashOrg = None if self.randomize else hashAnObject( (0, self.prehash, zdx, ydx, xdx) )
-        hashSft = None if self.randomize else hashAnObject( (1, self.prehash, zdx, ydx, xdx) )
+        hashSft = None if self.randomize else hashAnObject( (self.prehash, zdx, ydx, xdx, 1) )
         #xShift = random.randint(-TCfg.maximumArtificialShift, TCfg.maximumArtificialShift) \
         #            if self.randomize else \
         #         hashOrg % (2*TCfg.maximumArtificialShift+1) - TCfg.maximumArtificialShift
@@ -649,8 +649,9 @@ batchNormOpt = {}
 ##################################################
 class GeneratorTemplate(nn.Module):
 
-    def __init__(self, latentChannels=0):
+    def __init__(self, latentChannels=0, inputChannels = 4):
         super(GeneratorTemplate, self).__init__()
+        self.inputChannels = inputChannels
         self.latentChannels = latentChannels
         self.baseChannels = 16
         self.amplitude = 4
@@ -702,7 +703,7 @@ class GeneratorTemplate(nn.Module):
 
 
     def createFClink(self) :
-        smpl = torch.zeros((1, 4+abs(self.latentChannels), *DCfg.inShape))
+        smpl = torch.zeros((1, self.inputChannels + abs(self.latentChannels), *DCfg.inShape))
         with torch.no_grad() :
             for encoder in self.encoders :
                 smpl = encoder(smpl)
@@ -722,7 +723,7 @@ class GeneratorTemplate(nn.Module):
 
     def createLastTouch(self) :
         toRet = nn.Sequential(
-            nn.Conv2d(self.baseChannels+4, 2, 1),
+            nn.Conv2d(self.baseChannels+self.inputChannels, 2, 1),
             nn.Tanh(),
         )
         fillWheights(toRet)
