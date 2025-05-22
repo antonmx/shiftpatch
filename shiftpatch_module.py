@@ -654,7 +654,7 @@ class GeneratorTemplate(nn.Module):
         self.inputChannels = inputChannels
         self.latentChannels = latentChannels
         self.baseChannels = 16
-        self.amplitude = 4
+        self.amplitude = 1
 
 
     def createLatent(self) :
@@ -743,7 +743,7 @@ class GeneratorTemplate(nn.Module):
 
             presentInBoth = ( masks[:,0,...] * masks[:,1,...] > 0 )[:,None]
             invSums = inverseElements( torch.count_nonzero(presentInBoth, dim=(-1,-2)) )
-            emeans = ( self.amplitude * images.sum(dim=(-1,-2)) * invSums ) [...,None,None]
+            emeans = ( images.sum(dim=(-1,-2)) * invSums ) [...,None,None]
             procImages = images[:,[0,1],...] * masks * inverseElements(emeans) - 0.5
             procImages = torch.cat( (procImages, masks), dim=1 )
 
@@ -787,7 +787,7 @@ class GeneratorTemplate(nn.Module):
         upTrain = [mid]
         for level, decoder in enumerate(self.decoders) :
             upTrain.append( decoder( torch.cat( (upTrain[-1], dwTrain[-1-level]), dim=1 ) ) )
-        res = images[:,[1,0],...] + self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
+        res = images[:,[1,0],...] + self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
 
         res = self.postProc(res, procInf)
         saveToInterim('output', res)
