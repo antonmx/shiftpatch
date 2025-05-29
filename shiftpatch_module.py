@@ -71,6 +71,7 @@ TCfg = initIfNew('TCfg')
 @dataclass
 class DCfgClass:
     inShape : tuple = (80,80)
+    hash = None
 DCfg = initIfNew('DCfg')
 
 
@@ -432,8 +433,8 @@ class ShiftedPair :
         else :
             raise Exception(f"Bad index type {type(index)} {index} shifted pair.")
         zdx, ydx, xdx = int(zdx), int(ydx), int(xdx) # to make sure hashes are same irrespectively of those variable types
-        hashOrg = None if self.randomize else hashAnObject( (0, self.prehash, zdx, ydx, xdx) )
-        hashSft = None if self.randomize else hashAnObject( (self.prehash, zdx, ydx, xdx, 1) )
+        hashOrg = None if self.randomize else hashAnObject( (0, self.prehash, zdx, ydx, xdx, DCfg.hash) )
+        hashSft = None if self.randomize else hashAnObject( (1, self.prehash, zdx, ydx, xdx, DCfg.hash) )
         #xShift = random.randint(-TCfg.maximumArtificialShift, TCfg.maximumArtificialShift) \
         #            if self.randomize else \
         #         hashOrg % (2*TCfg.maximumArtificialShift+1) - TCfg.maximumArtificialShift
@@ -556,7 +557,8 @@ TrainShiftedPairs = [ [ dataRoot + prefix + postfix
                                        ] ]
                          for prefix in [ "02_dir", "02_flp",
                                          "03_dir", "03_flp",
-                                         "04_dir", "04_flp", ] ]
+                                         "04_dir", "04_flp",
+                                         "05", "06"] ]
 examples = [
     (1, 924, 315, 1580),
     (1, 534, 733, 1298),
@@ -967,6 +969,8 @@ def pixelsCounted(masks) :
     return toRets.sum(dim=(-1,-2))
 
 
+testInTrain = False
+
 
 def summarizeSet(dataloader):
 
@@ -977,10 +981,8 @@ def summarizeSet(dataloader):
     totalIts  = 0
     generator.to(TCfg.device)
     discriminator.to(TCfg.device)
-    #generator.eval()
-    #discriminator.eval()
-    generator.train()
-    discriminator.train()
+    generator.train(testInTrain)
+    discriminator.train(testInTrain)
     with torch.no_grad() :
         for it , data in tqdm.tqdm(enumerate(dataloader), total=int(len(dataloader))):
 
@@ -1064,10 +1066,8 @@ def testMe(tSet, item=None, plotMe=True) :
         images = images.unsqueeze(0)
     nofIm = images.shape[0]
     generatedImages = torch.empty_like(images)
-    generator.eval()
-    discriminator.eval()
-    #generator.train()
-    #discriminator.train()
+    generator.train(testInTrain)
+    discriminator.train(testInTrain)
     masks = images[:,2:,...]
     with torch.no_grad() :
         generatedImages[:,0:2,...] = generator.forward( (images[:,0:4,...], None) )
@@ -1223,6 +1223,8 @@ normRec=1
 normSSIM=1
 skipDis = False
 skipGen = False
+trainCyclesDis = 1
+trainCyclesGen = 1
 
 def restoreCheckpoint(path=None, logDir=None) :
     if logDir is None :
@@ -1256,7 +1258,7 @@ def train_step(images):
     generator.train()
 
     # train discriminator
-    if not noAdv :
+    for _ in range(0 if noAdv else trainCyclesDis) :
         pred_real = torch.empty((nofIm,2), requires_grad=False)
         pred_fake = torch.empty((nofIm,2), requires_grad=False)
         for param in discriminator.parameters() :
@@ -1273,9 +1275,9 @@ def train_step(images):
                 pred_both = torch.cat((subPred_realD, subPred_fakeD), dim=0)
                 subD_loss = loss_Adv(labelsDis, pred_both).sum()
             # train discriminator only if it is not too good :
-            if not skipDis and ( subPred_fakeD.mean() > 0.2 or subPred_realD.mean() < 0.8 ) :
-                trainRes.disPerformed += 1/TCfg.batchSplit
-                subD_loss.backward()
+            #if not skipDis and ( subPred_fakeD.mean() > 0.2 or subPred_realD.mean() < 0.8 ) :
+            trainRes.disPerformed += 1/TCfg.batchSplit
+            subD_loss.backward()
             trainRes.lossD += subD_loss.item()
             pred_real[subRange] = subPred_realD.clone().detach()
             pred_fake[subRange] = subPred_fakeD.clone().detach()
@@ -1284,8 +1286,7 @@ def train_step(images):
         trainRes.lossD /= TCfg.batchSplit
         trainRes.predReal = pred_real.mean().item()
         trainRes.predFake = pred_fake.mean().item()
-
-    else :
+    if noAdv :
         pred_real = torch.zeros((1,), requires_grad=False)
         pred_fake = torch.zeros((1,), requires_grad=False)
 
@@ -1293,29 +1294,30 @@ def train_step(images):
     #discriminator.eval()
     for param in discriminator.parameters() :
         param.requires_grad = False
-    optimizer_G.zero_grad()
-    for i in range(TCfg.batchSplit) :
-        subRange = np.s_[i*subBatchSize:(i+1)*subBatchSize] if TCfg.batchSplit > 1 else np.s_[:]
-        masks = images[subRange,2:,...]
-        subFakeImages = generator.forward((images[subRange,0:4,...],None))
-        if noAdv :
-            subG_loss = loss_Rec( images[subRange,0:2,...], subFakeImages, masks)
-        else :
-            subPred_fakeG = discriminator(subFakeImages)
-            subGA_loss, subGD_loss = loss_Gen(labelsTrue, subPred_fakeG,
-                                              images[subRange,0:2,...], subFakeImages, masks)
-            subG_loss = combinedLoss(subGA_loss, subGD_loss)
-        if not skipGen :
-            subG_loss.backward()
-        trainRes.lossGA += subGA_loss.item()
-        trainRes.lossGD += subGD_loss.item()
-        pred_fake[subRange] = subPred_fakeG.clone().detach()
-        fakeImages[subRange,...] = subFakeImages.detach()
-    optimizer_G.step()
-    optimizer_G.zero_grad(set_to_none=True)
-    trainRes.lossGA /= TCfg.batchSplit
-    trainRes.lossGD /= TCfg.batchSplit
-    trainRes.predFake = pred_fake.mean().item()
+    for _ in range(trainCyclesGen) :
+        optimizer_G.zero_grad()
+        for i in range(TCfg.batchSplit) :
+            subRange = np.s_[i*subBatchSize:(i+1)*subBatchSize] if TCfg.batchSplit > 1 else np.s_[:]
+            masks = images[subRange,2:,...]
+            subFakeImages = generator.forward((images[subRange,0:4,...],None))
+            if noAdv :
+                subG_loss = loss_Rec( images[subRange,0:2,...], subFakeImages, masks)
+            else :
+                subPred_fakeG = discriminator(subFakeImages)
+                subGA_loss, subGD_loss = loss_Gen(labelsTrue, subPred_fakeG,
+                                                  images[subRange,0:2,...], subFakeImages, masks)
+                subG_loss = combinedLoss(subGA_loss, subGD_loss)
+            if not skipGen :
+                subG_loss.backward()
+            trainRes.lossGA += subGA_loss.item()
+            trainRes.lossGD += subGD_loss.item()
+            pred_fake[subRange] = subPred_fakeG.clone().detach()
+            fakeImages[subRange,...] = subFakeImages.detach()
+        optimizer_G.step()
+        optimizer_G.zero_grad(set_to_none=True)
+        trainRes.lossGA /= TCfg.batchSplit
+        trainRes.lossGD /= TCfg.batchSplit
+        trainRes.predFake = pred_fake.mean().item()
 
 
     # prepare report
