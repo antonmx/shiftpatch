@@ -804,7 +804,9 @@ class DiscriminatorTemplate(nn.Module):
 
     def __init__(self):
         super(DiscriminatorTemplate, self).__init__()
+        self.chIn = 2 if discriminatePair else 1
         self.baseChannels = 16
+
 
     def encblock(self, chIn, chOut, kernel, stride=1, norm=False, dopadding=False) :
         chIn = int(chIn*self.baseChannels)
@@ -822,8 +824,8 @@ class DiscriminatorTemplate(nn.Module):
         return torch.nn.Sequential(*layers)
 
     def createHead(self) :
-        chIn = 2 if discriminatePair else 1
-        encSh = self.body(torch.zeros((1,chIn,*DCfg.inShape))).shape
+        #chIn = 2 if discriminatePair else 1
+        encSh = self.body(torch.zeros((1,self.chIn,*DCfg.inShape))).shape
         linChannels = math.prod(encSh)
         toRet = nn.Sequential(
             nn.Flatten(),
