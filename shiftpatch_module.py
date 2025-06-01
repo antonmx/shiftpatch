@@ -1283,7 +1283,7 @@ def train_step(images):
             pred_fake[subRange] = subPred_fakeD.clone().detach()
         optimizer_D.step()
         optimizer_D.zero_grad(set_to_none=True)
-        trainRes.lossD /= TCfg.batchSplit
+        trainRes.lossD /= (TCfg.batchSplit*trainCyclesDis)
         trainRes.predReal = pred_real.mean().item()
         trainRes.predFake = pred_fake.mean().item()
     if noAdv :
@@ -1315,8 +1315,8 @@ def train_step(images):
             fakeImages[subRange,...] = subFakeImages.detach()
         optimizer_G.step()
         optimizer_G.zero_grad(set_to_none=True)
-        trainRes.lossGA /= TCfg.batchSplit
-        trainRes.lossGD /= TCfg.batchSplit
+        trainRes.lossGA /= (TCfg.batchSplit*trainCyclesGen)
+        trainRes.lossGD /= (TCfg.batchSplit*trainCyclesGen)
         trainRes.predFake = pred_fake.mean().item()
 
 
