@@ -1287,7 +1287,7 @@ def train_step(images):
         optimizer_D.zero_grad(set_to_none=True)
         trainRes.predReal = pred_real.mean().item()
         trainRes.predFake = pred_fake.mean().item()
-    trainRes.lossD /= (TCfg.batchSplit*trainCyclesDis)
+    trainRes.lossD *= 1 / (TCfg.batchSplit*trainCyclesDis) if trainCyclesDis else 0
     if noAdv :
         pred_real = torch.zeros((1,), requires_grad=False)
         pred_fake = torch.zeros((1,), requires_grad=False)
@@ -1318,8 +1318,9 @@ def train_step(images):
         optimizer_G.step()
         optimizer_G.zero_grad(set_to_none=True)
         trainRes.predFake = pred_fake.mean().item()
-    trainRes.lossGA /= (TCfg.batchSplit*trainCyclesGen)
-    trainRes.lossGD /= (TCfg.batchSplit*trainCyclesGen)
+    if trainCyclesGen :
+        trainRes.lossGA /= (TCfg.batchSplit*trainCyclesGen)
+        trainRes.lossGD /= (TCfg.batchSplit*trainCyclesGen)
 
 
     # prepare report
