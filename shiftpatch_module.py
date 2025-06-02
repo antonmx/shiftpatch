@@ -1087,6 +1087,11 @@ def testMe(tSet, item=None, plotMe=True) :
             labelsDis = torch.cat( (labelsTrue, labelsFalse), dim=0).to(TCfg.device).requires_grad_(False)
             D_loss = loss_Adv(labelsDis, torch.cat((rprobs, fprobs), dim=0)).mean().item()
             GA_loss, GD_loss = loss_Gen(labelsTrue, fprobs, images[:,0:2,...], generatedImages[:,0:2,...], masks)
+        else :
+            GA_loss = D_loss = 0.631
+            GD_loss = Rec_diff
+            fprob = rprob = 0.5
+
 
         mn = torch.where( masks[:,0:2,...] > 0 , images[:,0:2,...], images.max() ).amin(dim=(2,3))
         generatedImages[:,0:2,...] = masks[:,0:2,...] * images[:,0:2,...] + \
@@ -1289,8 +1294,8 @@ def train_step(images):
         trainRes.predFake = pred_fake.mean().item()
     trainRes.lossD *= 1 / (TCfg.batchSplit*trainCyclesDis) if trainCyclesDis else 0
     if noAdv :
-        pred_real = torch.zeros((1,), requires_grad=False)
-        pred_fake = torch.zeros((1,), requires_grad=False)
+        pred_real = torch.full((1,), fill_value=0.5, requires_grad=False)
+        pred_fake = torch.full((1,), fill_value=0.5, requires_grad=False)
 
     # train generator
     #discriminator.eval()
@@ -1304,16 +1309,17 @@ def train_step(images):
             subFakeImages = generator.forward((images[subRange,0:4,...],None))
             if noAdv :
                 subG_loss = loss_Rec( images[subRange,0:2,...], subFakeImages, masks)
+                subGA_loss = subGD_loss = subG_loss
             else :
                 subPred_fakeG = discriminator(subFakeImages)
                 subGA_loss, subGD_loss = loss_Gen(labelsTrue, subPred_fakeG,
                                                   images[subRange,0:2,...], subFakeImages, masks)
                 subG_loss = combinedLoss(subGA_loss, subGD_loss)
+                pred_fake[subRange] = subPred_fakeG.clone().detach()
             if not skipGen :
                 subG_loss.backward()
             trainRes.lossGA += subGA_loss.item()
             trainRes.lossGD += subGD_loss.item()
-            pred_fake[subRange] = subPred_fakeG.clone().detach()
             fakeImages[subRange,...] = subFakeImages.detach()
         optimizer_G.step()
         optimizer_G.zero_grad(set_to_none=True)
