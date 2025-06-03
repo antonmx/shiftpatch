@@ -951,7 +951,9 @@ def loss_MSSSIM(p_true, p_pred, masks):
 
 SSIM_MSE = 1
 def loss_Rec(p_true, p_pred, masks):
-    loss = loss_MSSSIM(p_true, p_pred, masks)
+    lossSSIM = loss_MSSSIM(p_true, p_pred, masks) if SSIM_MSE > 0 else 0
+    lossMSE = loss_MSE(p_true, p_pred, masks) if SSIM_MSE < 1 else 0
+    loss = SSIM_MSE * lossSSIM + (1-SSIM_MSE) * lossMSE
     return loss
 
 def loss_Gen(y_true, y_pred, p_true, p_pred, masks):
@@ -1290,12 +1292,12 @@ def train_step(images):
             pred_fake[subRange] = subPred_fakeD.clone().detach()
         optimizer_D.step()
         optimizer_D.zero_grad(set_to_none=True)
-        trainRes.predReal = pred_real.mean().item()
-        trainRes.predFake = pred_fake.mean().item()
-    trainRes.lossD *= 1 / (TCfg.batchSplit*trainCyclesDis) if trainCyclesDis else 0
     if noAdv :
         pred_real = torch.full((1,), fill_value=0.5, requires_grad=False)
         pred_fake = torch.full((1,), fill_value=0.5, requires_grad=False)
+    trainRes.lossD *= 1 / (TCfg.batchSplit*trainCyclesDis) if trainCyclesDis else 0
+    trainRes.predReal = pred_real.mean().item()
+    trainRes.predFake = pred_fake.mean().item()
 
     # train generator
     #discriminator.eval()
@@ -1323,10 +1325,10 @@ def train_step(images):
             fakeImages[subRange,...] = subFakeImages.detach()
         optimizer_G.step()
         optimizer_G.zero_grad(set_to_none=True)
-        trainRes.predFake = pred_fake.mean().item()
     if trainCyclesGen :
         trainRes.lossGA /= (TCfg.batchSplit*trainCyclesGen)
         trainRes.lossGD /= (TCfg.batchSplit*trainCyclesGen)
+    trainRes.predFake = pred_fake.mean().item()
 
 
     # prepare report
