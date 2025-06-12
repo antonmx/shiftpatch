@@ -740,20 +740,20 @@ class GeneratorTemplate(nn.Module):
             if orgDims == 3 :
                 images = images.view(1, *images.shape)
             #procImages = images[:,0:4,...].clone().detach()
-            masks = images[:,2:,...]
-            images = images[:,0:2,...]
-
+            masks = images[:,2:4,...]
             presentInBoth = ( masks[:,0,...] * masks[:,1,...] > 0 )[:,None]
             invSums = inverseElements( torch.count_nonzero(presentInBoth, dim=(-1,-2)) )
-            emeans = ( images.sum(dim=(-1,-2)) * invSums ) [...,None,None]
-            procImages = images[:,[0,1],...] * masks * inverseElements(emeans) - 0.5
-            procImages = torch.cat( (procImages, masks), dim=1 )
+            images = images[:,0:2,...]
+            emeans = ( (images*presentInBoth).sum(dim=(-1,-2)) * invSums ) [...,None,None]
+            procImages = images * inverseElements(emeans)
+            procImages = procImages[:,[0,1],...] * masks \
+                       + procImages[:,[1,0],...] * (1-masks) \
+                       - 0.5
+            #procImages = torch.cat( (procImages, masks), dim=1 )
 
             noises = noises if noises is not None else None if not self.latentChannels else \
                 torch.randn( (images.shape[0], TCfg.latentDim) , device = TCfg.device)
 
-        noises.requires_grad_ = self.training
-        procImages.requires_grad_ = self.training
         return (procImages, noises), (emeans, orgDims)
 
 
@@ -777,6 +777,7 @@ class GeneratorTemplate(nn.Module):
             if not save_interim is None :
                 save_interim[key] = data.clone().detach()
 
+        masks = input[0][:,2:4,...]
         input, procInf = self.preProc(input)
         images, noises = input
         saveToInterim('input', images)
@@ -791,7 +792,7 @@ class GeneratorTemplate(nn.Module):
             upTrain.append( decoder( torch.cat( (upTrain[-1], dwTrain[-1-level]), dim=1 ) ) )
         res = images[:,[1,0],...] + self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
 
-        res = self.postProc(res, procInf)
+        res = torch.where ( masks > 0 , images, self.postProc(res, procInf) )
         saveToInterim('output', res)
         return res
 
