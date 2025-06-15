@@ -745,10 +745,8 @@ class GeneratorTemplate(nn.Module):
             invSums = inverseElements( torch.count_nonzero(presentInBoth, dim=(-1,-2)) )
             images = images[:,0:2,...]
             emeans = ( (images*presentInBoth).sum(dim=(-1,-2)) * invSums ) [...,None,None]
-            procImages = images * inverseElements(emeans)
-            procImages = procImages[:,[0,1],...] * masks \
-                       + procImages[:,[1,0],...] * (1-masks) \
-                       - 0.5
+            procImages = images * masks * inverseElements(emeans)
+            procImages = procImages + procImages[:,[1,0],...] * (1-masks) - 0.5
             #procImages = torch.cat( (procImages, masks), dim=1 )
 
             noises = noises if noises is not None else None if not self.latentChannels else \
