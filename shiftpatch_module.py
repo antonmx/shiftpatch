@@ -791,8 +791,8 @@ class GeneratorTemplate(nn.Module):
         for level, decoder in enumerate(self.decoders) :
             upTrain.append( decoder( torch.cat( (upTrain[-1], dwTrain[-1-level]), dim=1 ) ) )
         res = images[:,[1,0],...] + self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
-
-        res = torch.where ( masks > 0 , images, self.postProc(res, procInf) )
+        res = torch.where ( masks > 0 , images, res * masks[:,[1,0],...] )
+        res = self.postProc(res, procInf)
         saveToInterim('output', res)
         return res
 
@@ -1097,10 +1097,10 @@ def testMe(tSet, item=None, plotMe=True) :
 
 
         mn = torch.where( masks[:,0:2,...] > 0 , images[:,0:2,...], images.max() ).amin(dim=(2,3))
-        generatedImages[:,0:2,...] = masks[:,0:2,...] * images[:,0:2,...] + \
-                          ( 1-masks[:,0:2,...] ) * \
-                          ( masks[:,[1,0],...] * generatedImages[:,0:2,...] + \
-                            ( 1 - masks[:,[1,0],...] )  * mn[:,:,None,None] )
+        #generatedImages[:,0:2,...] = masks[:,0:2,...] * images[:,0:2,...] + \
+        #                  ( 1-masks[:,0:2,...] ) * \
+        #                  ( masks[:,[1,0],...] * generatedImages[:,0:2,...] + \
+        #                    ( 1 - masks[:,[1,0],...] )  * mn[:,:,None,None] )
         generatedImages[:,2:4,...] = torch.where( (masks[:,[0],...] + masks[:,[1],...]) > 0,
                                                   images[:,0:2,...], mn[:,:,None,None] )
 
@@ -1233,6 +1233,7 @@ normRec=1
 normSSIM=1
 skipDis = False
 skipGen = False
+skipThreshold = 0.2
 trainCyclesDis = 1
 trainCyclesGen = 1
 
@@ -1250,9 +1251,14 @@ def restoreCheckpoint(path=None, logDir=None) :
         return loadCheckPoint(path, generator, discriminator, optimizer_G, optimizer_D)
 
 
+def trainDis(subPred_fake, subPred_real) :
+    global skipThreshold, skipDis
+    return not skipDis and ( subPred_fake.mean() > skipThreshold and subPred_real.mean() < 1 - skipThreshold )
+
+
 def train_step(images):
 
-    global trainDis, trainGen, eDinfo, noAdv, withNoGrad, skipGen, skipDis
+    global trainDis, trainGen, eDinfo, noAdv, withNoGrad, skipGen, skipDis, skipThreshold
     trainRes = TrainResClass()
 
     nofIm = images.shape[0]
@@ -1285,9 +1291,9 @@ def train_step(images):
                 pred_both = torch.cat((subPred_realD, subPred_fakeD), dim=0)
                 subD_loss = loss_Adv(labelsDis, pred_both).sum()
             # train discriminator only if it is not too good :
-            #if not skipDis and ( subPred_fakeD.mean() > 0.2 or subPred_realD.mean() < 0.8 ) :
-            trainRes.disPerformed += 1/TCfg.batchSplit
-            subD_loss.backward()
+            if trainDis( subPred_fakeD, subPred_realD ):
+                trainRes.disPerformed += subBatchSize
+                subD_loss.backward()
             trainRes.lossD += subD_loss.item()
             pred_real[subRange] = subPred_realD.clone().detach()
             pred_fake[subRange] = subPred_fakeD.clone().detach()
@@ -1321,6 +1327,7 @@ def train_step(images):
                 pred_fake[subRange] = subPred_fakeG.clone().detach()
             if not skipGen :
                 subG_loss.backward()
+                trainRes.genPerformed += subBatchSize
             trainRes.lossGA += subGA_loss.item()
             trainRes.lossGD += subGD_loss.item()
             fakeImages[subRange,...] = subFakeImages.detach()
@@ -1475,11 +1482,12 @@ def train(savedCheckPoint):
                 print(f"Epoch: {epoch:3} ({minTestEpoch:3})." +
                       f" (Train: {lastRec_train/normRec:.3f}/{minRecTrain/normRec:.3f}," +
                       f" Test: {lastRec_test/normTestRec:.3f}/{minRecTest/normTestRec:.3f}).\n" +
-                      f"{"Update.":<40s}" +
-                      ( (f" L1L: {updAcc.lossL1L / normL1L :.3f} " +
+                      ( (f"{"Update.":<40s}" + \
+                         f" L1L: {updAcc.lossL1L / normL1L :.3f} " +
                          f" MSE: {updAcc.lossMSE / normMSE :.3f} " ) \
                              if noAdv else
-                        (f" Dis: {updAcc.lossD :.3f} ({updAcc.predReal :.3f}) " +
+                        (f"{f"Update ({updAcc.disPerformed/updAcc.nofImages:.1e}/{updAcc.genPerformed/updAcc.nofImages:.1e}).":<40s}" + \
+                         f" Dis: {updAcc.lossD :.3f} ({updAcc.predReal :.3f}) " +
                          f" Adv: {updAcc.lossGA :.3f} ({updAcc.predFake :.3f}) " +
                          f" Gen: { combinedLoss(updAcc.lossGA, updAcc.lossGD) / normComb :.3f} " ) ) +
                       f" Rec: {updAcc.lossRec / normRec :.3f} "
