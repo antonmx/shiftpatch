@@ -1393,11 +1393,11 @@ def train(savedCheckPoint):
 
     discriminator.to(TCfg.device)
     generator.to(TCfg.device)
-    lastUpdateTime = time.time()
     lastSaveTime = time.time()
 
     while TCfg.nofEpochs is None or epoch <= TCfg.nofEpochs :
         epoch += 1
+        lastUpdateTime = time.time()
         beforeEachEpoch(locals())
         dataLoader = createDataLoader(createSubSet(trainSet), num_workers=TCfg.loaderWorkers)
 
