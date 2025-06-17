@@ -25,6 +25,7 @@ from torchvision import transforms
 from torch.utils.tensorboard import SummaryWriter
 #import pytorch_msssim
 import ssim
+import pytorch_amfill
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -508,6 +509,9 @@ class ManyShiftedPairs :
                     if index is None or isinstance(index, tuple) else \
                         self.container[int(index)]
                 data = torch.tensor(data)
+                missingInBoth =  ( data[2,...] + data[3,...] > 0 )
+                pytorch_amfill.ops.amfill_(data[0,...], missingInBoth)
+                pytorch_amfill.ops.amfill_(data[1,...], missingInBoth)
                 if doTransform and self.transform :
                     data = self.transform(data)
                 return (data, index)
@@ -742,11 +746,12 @@ class GeneratorTemplate(nn.Module):
             #procImages = images[:,0:4,...].clone().detach()
             masks = images[:,2:4,...]
             presentInBoth = ( masks[:,0,...] * masks[:,1,...] > 0 )[:,None]
+            missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
             invSums = inverseElements( torch.count_nonzero(presentInBoth, dim=(-1,-2)) )
             images = images[:,0:2,...]
             emeans = ( (images*presentInBoth).sum(dim=(-1,-2)) * invSums ) [...,None,None]
-            procImages = images * masks * inverseElements(emeans)
-            procImages = procImages + procImages[:,[1,0],...] * (1-masks) - 0.5
+            procImages = images * torch.logical_or(masks, ~missingInBoth) * inverseElements(emeans)
+            procImages = procImages + procImages[:,[1,0],...] * (1-masks) * missingInBoth - 0.5
             #procImages = torch.cat( (procImages, masks), dim=1 )
 
             noises = noises if noises is not None else None if not self.latentChannels else \
@@ -789,7 +794,8 @@ class GeneratorTemplate(nn.Module):
         for level, decoder in enumerate(self.decoders) :
             upTrain.append( decoder( torch.cat( (upTrain[-1], dwTrain[-1-level]), dim=1 ) ) )
         res = images[:,[1,0],...] + self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
-        res = torch.where ( masks > 0 , images, res * masks[:,[1,0],...] )
+        missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
+        res = torch.where ( torch.logical_or(masks > 0, ~missingInBoth) , images, res * masks[:,[1,0],...] )
         res = self.postProc(res, procInf)
         saveToInterim('output', res)
         return res
@@ -1118,6 +1124,8 @@ def testMe(tSet, item=None, plotMe=True) :
               f" Pixels: {totalPixels}.")
         for idx in range(images.shape[0]) :
             trImages = createTrimage(images[idx,...])
+            missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
+            generatedImages *= missingInBoth
             plotImages( [generatedImages[idx,0].cpu(), auxImages[idx,0].cpu(),
                          trImages[0,...], images[idx,0] ] )
             plotImages( [generatedImages[idx,1].cpu(), auxImages[idx,1].cpu(),
