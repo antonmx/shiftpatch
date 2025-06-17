@@ -54,11 +54,12 @@ void amfill_cpu_common(const at::Tensor& im, const at::Tensor& mask, at::Tensor&
           crad++;
           const int cr2 = crad*crad;
           for (int dy = -crad ; dy <= crad ; dy++) {
-            if ( idy < -dy || idy >= im_sizes[0]-dy )
+            const int idyy = idy+dy;
+            if ( idyy < 0 || idyy >= im_sizes[0] )
               continue;
             const int dx = floor( sqrt((float)(cr2-dy*dy)) );
-            if  ( ( idx-dx >= 0  &&  mask_accessor[idy][idx-dx] )
-               || ( idx+dx < im_sizes[1]  &&  mask_accessor[idy][idx+dx] ) ) { // found
+            if  ( ( idx-dx >= 0  &&  mask_accessor[idyy][idx-dx] )
+               || ( idx+dx < im_sizes[1]  &&  mask_accessor[idyy][idx+dx] ) ) { // found
               crad *= -1; // negative indicator set
               break;
             }

@@ -1376,8 +1376,8 @@ def afterReport(herelocals) :
 epoch=initIfNew('epoch', 0)
 iter = initIfNew('iter', 0)
 imer = initIfNew('iter', 0)
-minRecTrain = initIfNew('minGEpoch')
-minRecTest = initIfNew('minGdLoss', 1)
+minRecTrain = initIfNew('minRecTrain', 1)
+minRecTest = initIfNew('minRecTest', 1)
 minTestEpoch = 0
 startFrom = initIfNew('startFrom', 0)
 normTestMSE=1
