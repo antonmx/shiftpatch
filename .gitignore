@@ -1,3 +1,7 @@
+# my addition
+.bash_history_pwd
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
