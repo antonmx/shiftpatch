@@ -1101,22 +1101,16 @@ def testMe(tSet, item=None, plotMe=True) :
 
 
         mn = torch.where( masks[:,0:2,...] > 0 , images[:,0:2,...], images.max() ).amin(dim=(2,3))
+        missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None,:,:]
+        generatedImages[:,0:2,...] = torch.where(missingInBoth, generatedImages[:,0:2,...], mn[...,None,None])
         #generatedImages[:,0:2,...] = masks[:,0:2,...] * images[:,0:2,...] + \
         #                  ( 1-masks[:,0:2,...] ) * \
         #                  ( masks[:,[1,0],...] * generatedImages[:,0:2,...] + \
         #                    ( 1 - masks[:,[1,0],...] )  * mn[:,:,None,None] )
-        generatedImages[:,2:4,...] = torch.where( (masks[:,[0],...] + masks[:,[1],...]) > 0,
-                                                  images[:,0:2,...], mn[:,:,None,None] )
+        generatedImages[:,2:4,...] = generator.preProc((images[:,0:4,...], None))[0][0]
 
-    auxImages = images[:,[0,1],...] * masks[:,[0,1],...] + \
-                images[:,[1,0],...] * masks[:,[1,0],...] * (1-masks[:,[0,1],...])
-    auxMasks  = masks[:,[0,1],...] + masks[:,[1,0],...] * (1-masks[:,[0,1],...])
-    totMax = auxImages.max()
-    auxMins = torch.where( auxMasks > 0, auxImages, totMax ).amin(dim=(2,3))
-    auxImages = torch.where(auxMasks < 1, auxMins[:,:,None,None], auxImages)
-
-    auxImages = auxImages.cpu()
     images = images.cpu()
+    generatedImages = generatedImages.cpu()
     if plotMe :
         print(f"Losses: Rec {Rec_diff:.3e}, MSE {MSE_diff:.3e}, L1L {L1L_diff:.3e},"
               f" Dis: {D_loss:3f} ({rprob:.3f}), Adv: {GA_loss:.3f} ({fprob:.3f}),"
@@ -1124,19 +1118,16 @@ def testMe(tSet, item=None, plotMe=True) :
               f" Pixels: {totalPixels}.")
         for idx in range(images.shape[0]) :
             trImages = createTrimage(images[idx,...])
-            missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
-            generatedImages *= missingInBoth
-            plotImages( [generatedImages[idx,0].cpu(), auxImages[idx,0].cpu(),
+            plotImages( [generatedImages[idx,0], generatedImages[idx,2],
                          trImages[0,...], images[idx,0] ] )
-            plotImages( [generatedImages[idx,1].cpu(), auxImages[idx,1].cpu(),
+            plotImages( [generatedImages[idx,1], generatedImages[idx,3],
                          trImages[1,...], images[idx,1] ] )
     if orgDim == 3 :
         generatedImages = generatedImages.squeeze(0)
 
 #return Rec_diff, MSE_diff, L1L_diff, Real_prob, Fake_prob, D_loss, GA_loss, GD_loss
     return generatedImages, totalPixels, \
-           ( Rec_diff, MSE_diff, L1L_diff, rprob, fprob, D_loss, GA_loss, GD_loss ), \
-           auxImages
+           ( Rec_diff, MSE_diff, L1L_diff, rprob, fprob, D_loss, GA_loss, GD_loss )
 
 
 def calculateWeights(images) :
