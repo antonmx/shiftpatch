@@ -362,6 +362,87 @@ def hdfData(inputString):
     return data
 
 
+
+
+def residesInMemory(hdfName) :
+    mmapPrefixes = ["/dev/shm",]
+    if "CTAS_MMAP_PATH" in os.environ :
+        mmapPrefixes.append[os.environ["CTAS_MMAP_PATH"].split(':')]
+    hdfName = os.path.realpath(hdfName)
+    for mmapPrefix in mmapPrefixes :
+        if hdfName.startswith(mmapPrefix) :
+            return True
+    return False
+
+def goodForMmap(trgH5F, data) :
+    fileSize = trgH5F.id.get_filesize()
+    offset = data.id.get_offset()
+    plist = data.id.get_create_plist()
+    if offset < 0 \
+    or not plist.get_layout() in (h5d.CONTIGUOUS, h5d.COMPACT) \
+    or plist.get_external_count() \
+    or plist.get_nfilters() \
+    or fileSize - offset < math.prod(data.shape) * data.dtype.itemsize :
+        return None, None
+    else :
+        return offset, data.id.dtype
+
+def getInData(inputString, verbose=False, preread=False):
+    nameSplit = inputString.split(':')
+    if len(nameSplit) == 1 : # tiff image
+        data = loadImage(nameSplit[0])
+        data = np.expand_dims(data, 1)
+        return data
+    if len(nameSplit) != 2 :
+        raise Exception(f"String \"{inputString}\" does not represent an HDF5 format \"fileName:container\".")
+    hdfName = nameSplit[0]
+    hdfVolume = nameSplit[1]
+    try :
+        trgH5F =  h5py.File(hdfName,'r', swmr=True)
+    except :
+        raise Exception(f"Failed to open HDF file '{hdfName}'.")
+    if  hdfVolume not in trgH5F.keys():
+        raise Exception(f"No dataset '{hdfVolume}' in input file {hdfName}.")
+    data = trgH5F[hdfVolume]
+    if not data.size :
+        raise Exception(f"Container \"{inputString}\" is zero size.")
+    sh = data.shape
+    if len(sh) != 3 :
+        raise Exception(f"Dimensions of the container \"{inputString}\" is not 3: {sh}.")
+    try : # try to mmap hdf5 if it is in memory
+        if not residesInMemory(hdfName) :
+            raise Exception()
+        fileSize = trgH5F.id.get_filesize()
+        offset = data.id.get_offset()
+        dtype = data.id.dtype
+        plist = data.id.get_create_plist()
+        if offset < 0 \
+        or not plist.get_layout() in (h5d.CONTIGUOUS, h5d.COMPACT) \
+        or plist.get_external_count() \
+        or plist.get_nfilters() \
+        or fileSize - offset < math.prod(sh) * data.dtype.itemsize :
+            raise Exception()
+        # now all is ready
+        dataN = np.memmap(hdfName, shape=sh, dtype=dtype, mode='r', offset=offset)
+        data = dataN
+        trgH5F.close()
+        #plist = trgH5F.id.get_access_plist()
+        #fileno = trgH5F.id.get_vfd_handle(plist)
+        #dataM = mmap.mmap(fileno, fileSize, offset=offset, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ)
+    except :
+        if preread :
+            dataN = np.empty(data.shape, dtype=np.float32)
+            if verbose :
+                print("Reading input ... ", end="", flush=True)
+            data.read_direct(dataN)
+            if verbose :
+                print("Done.")
+            data = dataN
+            trgH5F.close()
+    return data
+
+
+
 def hashAnObject(object) :
     digest = hashlib.sha256(pickle.dumps(object)).digest()
     return int.from_bytes(digest, 'big')
@@ -374,11 +455,11 @@ def hashAnObject(object) :
 class ShiftedPair :
 
     def __init__(self, orgVol, sftVol, shifts, orgMask=None, sftMask=None, randomize=False) :
-        self.orgData = hdfData(orgVol)
+        self.orgData = getInData(orgVol)
         self.shape = self.orgData.shape
         self.face = self.shape[1:]
         self.imgs = self.shape[0]
-        self.sftData = hdfData(sftVol)
+        self.sftData = getInData(sftVol)
         if self.sftData.shape != self.shape :
             raise Exception( "Shape mismatch of shifted volume:"
                             f" {self.sftData.shape} != {self.shape}.")
@@ -543,7 +624,8 @@ def createTrimage(itemSet, it=None) :
                           ( masks[2+it,...] * masks[3-it,...] + masks[1-it,...]) )
 
 
-dataRoot = os.path.dirname(os.path.abspath(__file__)) + "/data/"
+#dataRoot = os.path.dirname(os.path.abspath(__file__)) + "/data/"
+dataRoot = "/dev/shm/"
 TestShiftedPairs = [ [ dataRoot + prefix + postfix
                        for postfix in ["_org.hdf:/data",
                                        "_sft.hdf:/data",
@@ -561,8 +643,9 @@ TrainShiftedPairs = [ [ dataRoot + prefix + postfix
                                        ] ]
                          for prefix in [ "02_dir", "02_flp",
                                          "03_dir", "03_flp",
-                                         "04_dir", "04_flp",
-                                         "05", "06"] ]
+                                         #"04_dir", "04_flp",
+                                         #"05", "06",
+                                       ] ]
 examples = [
     (1, 924, 315, 1580),
     (1, 534, 733, 1298),
@@ -661,6 +744,7 @@ class GeneratorTemplate(nn.Module):
         self.latentChannels = latentChannels
         self.baseChannels = 16
         self.amplitude = 1
+        self.inmask = 0
 
 
     def createLatent(self) :
@@ -795,8 +879,9 @@ class GeneratorTemplate(nn.Module):
             upTrain.append( decoder( torch.cat( (upTrain[-1], dwTrain[-1-level]), dim=1 ) ) )
         res = images[:,[1,0],...] + self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
         missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
-        res = torch.where ( torch.logical_or(masks > 0, ~missingInBoth) , images, res * masks[:,[1,0],...] )
+        res = torch.where ( torch.logical_or(masks, ~missingInBoth) , images, res )
         res = self.postProc(res, procInf)
+        res = res * torch.where(missingInBoth, 1, self.inmask)
         saveToInterim('output', res)
         return res
 
@@ -1102,7 +1187,7 @@ def testMe(tSet, item=None, plotMe=True) :
 
         mn = torch.where( masks[:,0:2,...] > 0 , images[:,0:2,...], images.max() ).amin(dim=(2,3))
         missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None,:,:]
-        generatedImages[:,0:2,...] = torch.where(missingInBoth, generatedImages[:,0:2,...], mn[...,None,None])
+        #generatedImages[:,0:2,...] = torch.where(missingInBoth, generatedImages[:,0:2,...], mn[...,None,None])
         #generatedImages[:,0:2,...] = masks[:,0:2,...] * images[:,0:2,...] + \
         #                  ( 1-masks[:,0:2,...] ) * \
         #                  ( masks[:,[1,0],...] * generatedImages[:,0:2,...] + \
