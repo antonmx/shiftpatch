@@ -626,8 +626,8 @@ def createTrimage(itemSet, it=None) :
                           ( masks[2+it,...] * masks[3-it,...] + masks[1-it,...]) )
 
 
-#dataRoot = os.path.dirname(os.path.abspath(__file__)) + "/data/"
-dataRoot = "/dev/shm/"
+dataRoot = os.path.dirname(os.path.abspath(__file__)) + "/data/"
+#dataRoot = "/dev/shm/"
 TestShiftedPairs = [ [ dataRoot + prefix + postfix
                        for postfix in ["_org.hdf:/data",
                                        "_sft.hdf:/data",
