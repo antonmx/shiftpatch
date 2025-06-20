@@ -1336,7 +1336,13 @@ def restoreCheckpoint(path=None, logDir=None) :
 
 def trainDis(subPred_fake, subPred_real) :
     global skipThreshold, skipDis
+    return not skipDis
     return not skipDis and ( subPred_fake.mean() > skipThreshold and subPred_real.mean() < 1 - skipThreshold )
+
+def trainGen(subPred_fake, subPred_real) :
+    global skipThreshold, skipGen
+    return not skipGen
+    return not skipGen and ( subPred_fake.mean() < skipThreshold and subPred_real.mean() > 1 - skipThreshold )
 
 
 def train_step(images):
@@ -1408,7 +1414,7 @@ def train_step(images):
                                                   images[subRange,0:2,...], subFakeImages, masks)
                 subG_loss = combinedLoss(subGA_loss, subGD_loss)
                 pred_fake[subRange] = subPred_fakeG.clone().detach()
-            if not skipGen :
+            if trainGen( subPred_fakeG, pred_real[subRange]  ):
                 subG_loss.backward()
                 trainRes.genPerformed += subBatchSize
             trainRes.lossGA += subGA_loss.item()
