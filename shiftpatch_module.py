@@ -492,7 +492,9 @@ class ShiftedPair :
         self.iFace = self.orgImask.shape
         self.goodForTraining = np.argwhere( np.logical_and(self.orgImask > 0.99,
                                                            self.sftImask > 0.99) )
-        self.prehash = hashAnObject((orgVol, sftVol, orgMask, sftMask))
+        self.prehash = hashAnObject( (os.path.basename(orgVol.split(':')[0]) ,
+                                      os.path.basename(sftVol.split(':')[0]) ,
+                                      orgMask, sftMask) )
         self.randomize = randomize
 
 
@@ -643,14 +645,14 @@ TrainShiftedPairs = [ [ dataRoot + prefix + postfix
                                        ] ]
                          for prefix in [ "02_dir", "02_flp",
                                          "03_dir", "03_flp",
-                                         #"04_dir", "04_flp",
-                                         #"05", "06",
+                                         "04_dir", "04_flp",
+                                         "05", "06",
                                        ] ]
 examples = [
-    (1, 924, 315, 1580),
-    (1, 534, 733, 1298),
-    (1, 744, 23, 23),
-    (1, 772, 121, 1750)
+    (1, 924, 315, 1583),
+    (1, 534, 733, 1302),
+    (1, 744, 23, 43),
+    (1, 772, 121, 1758)
 ]
 
 #dataMeanNorm = (0.5,0.5,0,0,0,0) # masks not to be normalized
@@ -744,7 +746,6 @@ class GeneratorTemplate(nn.Module):
         self.latentChannels = latentChannels
         self.baseChannels = 16
         self.amplitude = 1
-        self.inmask = 0
 
 
     def createLatent(self) :
@@ -881,7 +882,7 @@ class GeneratorTemplate(nn.Module):
         missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
         res = torch.where ( torch.logical_or(masks, ~missingInBoth) , images, res )
         res = self.postProc(res, procInf)
-        res = res * torch.where(missingInBoth, 1, self.inmask)
+        #res = res * torch.where(missingInBoth, 1, self.inmask)
         saveToInterim('output', res)
         return res
 
