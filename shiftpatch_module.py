@@ -626,8 +626,8 @@ def createTrimage(itemSet, it=None) :
                           ( masks[2+it,...] * masks[3-it,...] + masks[1-it,...]) )
 
 
-dataRoot = os.path.dirname(os.path.abspath(__file__)) + "/data/"
-#dataRoot = "/dev/shm/"
+#dataRoot = os.path.dirname(os.path.abspath(__file__)) + "/data/"
+dataRoot = "/dev/shm/"
 TestShiftedPairs = [ [ dataRoot + prefix + postfix
                        for postfix in ["_org.hdf:/data",
                                        "_sft.hdf:/data",
@@ -1095,8 +1095,9 @@ def summarizeSet(dataloader):
                 subRange = np.s_[i*subBatchSize:(i+1)*subBatchSize] if TCfg.batchSplit > 1 else np.s_[:]
                 fakeImages[subRange,...] = generator.forward((images[subRange,0:4,...],None))
                 if not noAdv :
-                    rprobs[subRange,...] = discriminator(images[subRange,0:2,...])
-                    fprobs[subRange,...] = discriminator(fakeImages[subRange,...])
+                    missingInBoth =  ( masks[subRange,0,...] + masks[subRange,1,...] > 0 )[:,None]
+                    rprobs[subRange,...] = discriminator.forward(missingInBoth * images[subRange,0:2,...])
+                    fprobs[subRange,...] = discriminator.forward(missingInBoth * fakeImages[subRange,...])
 
             totalPixels += pixelsCounted(masks).sum()
             MSE_diff += loss_MSE( images[:,0:2,...], fakeImages, masks ).item()
@@ -1171,9 +1172,10 @@ def testMe(tSet, item=None, plotMe=True) :
             ( loss_func( images[:,0:2,...], generatedImages[:,0:2,...], masks ).item() \
                     for loss_func in [loss_MSE, loss_L1L, loss_Rec ] )
         if not noAdv :
-            rprobs = discriminator(images[:,0:2,...])
+            missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
+            rprobs = discriminator.forward(missingInBoth * images[:,0:2,...])
+            fprobs = discriminator.forward(missingInBoth * generatedImages[:,0:2,...])
             rprob = rprobs.mean().item()
-            fprobs = discriminator(generatedImages[:,0:2,...])
             fprob = fprobs.mean().item()
             labelsTrue = torch.full_like(fprobs,  1 - TCfg.labelSmoothFac)
             labelsFalse = torch.full_like(fprobs,  TCfg.labelSmoothFac)
@@ -1375,8 +1377,10 @@ def train_step(images):
             #with torch.no_grad() :
             subFakeImages = generator.forward((images[subRange,0:4,...],None))
             with torch.set_grad_enabled(not skipDis) :
-                subPred_realD = discriminator(images[subRange,0:2,...])
-                subPred_fakeD = discriminator(subFakeImages)
+                masks = images[subRange,2:,...]
+                missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
+                subPred_realD = discriminator.forward( missingInBoth * images[subRange,0:2,...] )
+                subPred_fakeD = discriminator.forward( missingInBoth * subFakeImages )
                 pred_both = torch.cat((subPred_realD, subPred_fakeD), dim=0)
                 subD_loss = loss_Adv(labelsDis, pred_both).sum()
             # train discriminator only if it is not too good :
@@ -1409,7 +1413,8 @@ def train_step(images):
                 subG_loss = loss_Rec( images[subRange,0:2,...], subFakeImages, masks)
                 subGA_loss = subGD_loss = subG_loss
             else :
-                subPred_fakeG = discriminator(subFakeImages)
+                missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
+                subPred_fakeG = discriminator.forward(subFakeImages * missingInBoth)
                 subGA_loss, subGD_loss = loss_Gen(labelsTrue, subPred_fakeG,
                                                   images[subRange,0:2,...], subFakeImages, masks)
                 subG_loss = combinedLoss(subGA_loss, subGD_loss)
