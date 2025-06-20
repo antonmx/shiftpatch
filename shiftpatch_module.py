@@ -1570,6 +1570,10 @@ def train(savedCheckPoint):
                                    {'Ref':updAcc.predReal
                                    ,'Gen':updAcc.predFake
                                    }, imer )
+                writer.add_scalars("Executes per iter",
+                                   {'Dis':updAcc.disPerformed/updAcc.nofImages
+                                   ,'Gen':updAcc.genPerformed/updAcc.nofImages
+                                   }, imer )
 
                 IPython.display.clear_output(wait=True)
                 beforeReport(locals())
@@ -1640,8 +1644,12 @@ def train(savedCheckPoint):
                            {'Ref': resAcc.predReal
                            ,'Gen': resAcc.predFake
                            }, epoch )
-        _ = testMe(refImages)
+        writer.add_scalars("Executes per epoch",
+                           {'Dis':resAcc.disPerformed/resAcc.nofImages
+                           ,'Gen':resAcc.genPerformed/resAcc.nofImages
+                           }, imer )
 
+        _ = testMe(refImages)
         summary = summarizeSet(testLoader)
         writer.add_scalars("Test per epoch",
                            {'MSE': summary[1] / normTestMSE
