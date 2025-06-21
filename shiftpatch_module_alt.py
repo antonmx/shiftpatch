@@ -623,36 +623,15 @@ def createTrimage(itemSet, it=None) :
 
 
 
-TestShiftedPairs = [ [ DCfg.dataRoot + prefix + postfix
-                       for postfix in ["_org.hdf:/data",
-                                       "_sft.hdf:/data",
-                                       "_pairWiseShifts_new.txt",
-                                       "_org_mask.tif",
-                                       "_sft_mask.tif",
-                                       ] ]
-                         for prefix in [ "01_dir", "01_flp" ] ]
-TrainShiftedPairs = [ [ DCfg.dataRoot + prefix + postfix
-                       for postfix in ["_org.hdf:/data",
-                                       "_sft.hdf:/data",
-                                       "_pairWiseShifts_new.txt",
-                                       "_org_mask.tif",
-                                       "_sft_mask.tif",
-                                       ] ]
-                         for prefix in [ "02_dir", "02_flp",
-                                         "03_dir", "03_flp",
-                                         "04_dir", "04_flp",
-                                         "05", "06"] ]
-examples = [
-    (1, 924, 315, 1583),
-    (1, 534, 733, 1302),
-    (1, 744, 23, 43),
-    (1, 772, 121, 1758)
-]
-
-#dataMeanNorm = (0.5,0.5,0,0,0,0) # masks not to be normalized
-
-
-def createSet( pairs, randomize) :
+def createSet( pairsPrefixes, randomize) :
+    pairs = [ [ DCfg.dataRoot + prefix + postfix
+                for postfix in ["_org.hdf:/data",
+                                "_sft.hdf:/data",
+                                "_pairWiseShifts_new.txt",
+                                "_org_mask.tif",
+                                "_sft_mask.tif",
+                                ] ]
+                    for prefix in pairsPrefixes ]
     setRoot = ManyShiftedPairs(pairs, randomize=randomize)
     mytransforms = \
         transforms.Compose([
@@ -667,12 +646,23 @@ def createSet( pairs, randomize) :
     return setRoot.get_dataset(mytransforms)
 
 def createTrainSet() :
-    return createSet(TrainShiftedPairs, True)
+    return createSet([ "02_dir", "02_flp",
+                       "03_dir", "03_flp",
+                       "04_dir", "04_flp",
+                       "05", "06"
+                     ], True)
 trainSet = initIfNew('trainSet')
 
 def createTestSet() :
-    return createSet(TestShiftedPairs, False)
+    return createSet([ "01_dir", "01_flp"], False )
 testSet = initIfNew('testSet')
+examples = [
+    (1, 924, 315, 1583),
+    (1, 534, 733, 1302),
+    (1, 744, 23, 43),
+    (1, 772, 121, 1758)
+]
+
 
 def createSubSet(tSet, subSetSize=None) :
     if subSetSize is None :
@@ -1185,7 +1175,7 @@ def testMe(tSet, item=None, plotMe=True) :
 
         mn = torch.where( masks[:,0:2,...] > 0 , images[:,0:2,...], images.max() ).amin(dim=(2,3))
         missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None,:,:]
-        #generatedImages[:,0:2,...] = torch.where(missingInBoth, generatedImages[:,0:2,...], mn[...,None,None])
+        generatedImages[:,0:2,...] = torch.where(missingInBoth, generatedImages[:,0:2,...], mn[...,None,None])
         #generatedImages[:,0:2,...] = masks[:,0:2,...] * images[:,0:2,...] + \
         #                  ( 1-masks[:,0:2,...] ) * \
         #                  ( masks[:,[1,0],...] * generatedImages[:,0:2,...] + \
@@ -1199,16 +1189,10 @@ def testMe(tSet, item=None, plotMe=True) :
               f" Dis: {D_loss:3f} ({rprob:.3f}), Adv: {GA_loss:.3f} ({fprob:.3f}),"
               f" Gen: {combinedLoss(GA_loss, GD_loss):.3e},"
               f" Pixels: {totalPixels}.")
-        missingInBoth =  ( masks[:,0,...] + masks[:,1,...] > 0 )[:,None]
-        plotImages = generatedImages.clone().detach()
-        mn = torch.where( masks[:,0:2,...] > 0 , plotImages[:,0:2,...], plotImages.max() ).amin(dim=(2,3))
-        plotImages[:,0:2,...] = torch.where(missingInBoth, plotImages[:,0:2,...], mn )
         for idx in range(images.shape[0]) :
             trImages = createTrimage(images[idx,...])
-            plotImages( [generatedImages[idx,0], generatedImages[idx,2],
-                         trImages[0,...], images[idx,0] ] )
-            plotImages( [generatedImages[idx,1], generatedImages[idx,3],
-                         trImages[1,...], images[idx,1] ] )
+            plotImages( [generatedImages[idx,0], generatedImages[idx,2], trImages[0,...], images[idx,0] ] )
+            plotImages( [generatedImages[idx,1], generatedImages[idx,3], trImages[1,...], images[idx,1] ] )
     if orgDim == 3 :
         generatedImages = generatedImages.squeeze(0)
 
