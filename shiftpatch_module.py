@@ -626,8 +626,8 @@ def createTrimage(itemSet, it=None) :
                           ( masks[2+it,...] * masks[3-it,...] + masks[1-it,...]) )
 
 
-#dataRoot = os.path.dirname(os.path.abspath(__file__)) + "/data/"
-dataRoot = "/dev/shm/"
+dataRoot = os.path.dirname(os.path.abspath(__file__)) + "/data/"
+#dataRoot = "/dev/shm/"
 TestShiftedPairs = [ [ dataRoot + prefix + postfix
                        for postfix in ["_org.hdf:/data",
                                        "_sft.hdf:/data",
@@ -1417,11 +1417,14 @@ def train_step(images):
                 subPred_fakeG = discriminator.forward(subFakeImages * missingInBoth)
                 subGA_loss, subGD_loss = loss_Gen(labelsTrue, subPred_fakeG,
                                                   images[subRange,0:2,...], subFakeImages, masks)
-                subG_loss = combinedLoss(subGA_loss, subGD_loss)
                 pred_fake[subRange] = subPred_fakeG.clone().detach()
-            if trainGen( subPred_fakeG, pred_real[subRange]  ):
+                subG_loss = combinedLoss(subGA_loss, subGD_loss)\
+                            if trainGen( subPred_fakeG, pred_real[subRange]  ) \
+                            else subGD_loss
+            if True :
+            #if trainGen( subPred_fakeG, pred_real[subRange]  ):
                 subG_loss.backward()
-                trainRes.genPerformed += subBatchSize
+                trainRes.genPerformed += subBatchSize if noAdv or trainGen( subPred_fakeG, pred_real[subRange]  ) else 0
             trainRes.lossGA += subGA_loss.item()
             trainRes.lossGD += subGD_loss.item()
             fakeImages[subRange,...] = subFakeImages.detach()
@@ -1545,14 +1548,14 @@ def train(savedCheckPoint):
                             clmn * ( DCfg.inShape[0]+imGap) : (clmn+1) * DCfg.inShape[0] + clmn * imGap ] = \
                         imgToAdd.cpu().numpy()
                 addImage(0,0, rndRes[0][0,...])
-                addImage(0,1, rndRes[0][1,...])
                 addImage(1,0, rndRes[0][2,...]) #createTrimage(rndInp, 0))
-                addImage(1,1, rndRes[0][3,...]) #createTrimage(rndInp, 1))
                 addImage(2,0, refRes[0][0,0,...])
-                addImage(2,1, refRes[0][0,1,...])
                 addImage(3,0, refRes[0][0,2,...])
-                addImage(3,1, refRes[0][0,3,...])
                 addImage(4,0, createTrimage(refImages[0,...],0))
+                addImage(0,1, rndRes[0][1,...])
+                addImage(1,1, rndRes[0][3,...]) #createTrimage(rndInp, 1))
+                addImage(2,1, refRes[0][0,1,...])
+                addImage(3,1, refRes[0][0,3,...])
                 addImage(4,1, createTrimage(refImages[0,...],1))
 
                 updAcc *= (1/updAcc.counts) if updAcc.counts > 0 else 0
