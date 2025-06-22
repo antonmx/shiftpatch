@@ -493,7 +493,7 @@ class ShiftedPair :
                                                            self.sftImask > 0.99) )
         self.prehash = hashAnObject( (os.path.basename(orgVol.split(':')[0]) ,
                                       os.path.basename(sftVol.split(':')[0]) ,
-                                      orgMask, sftMask) )
+                                      orgMask, sftMask, DCfg.hash) )
         self.randomize = randomize
 
 
