@@ -816,18 +816,19 @@ class GeneratorTemplate(nn.Module):
             orgDims = images.dim()
             if orgDims == 3 :
                 images = images.view(1, *images.shape)
-            #procImages = images[:,0:4,...].clone().detach()
             masks = images[:,2:4,...]
-            presentInBoth = ( masks[:,0,...] * masks[:,1,...] > 0 )[:,None]
-            invSums = inverseElements( torch.count_nonzero(presentInBoth, dim=(-1,-2)) )
             images = images[:,0:2,...]
+            presentInBoth = ( masks[:,[0],...] * masks[:,[1],...] > 0 )
+            invSums = inverseElements( torch.count_nonzero(presentInBoth, dim=(-1,-2)) )
             emeans = ( (images*presentInBoth).sum(dim=(-1,-2)) * invSums ) [...,None,None]
             procImages = images * masks * inverseElements(emeans)
-            procImages = procImages + procImages[:,[1,0],...] * (1-masks) - 0.5
-            missingInBoth =  missingMask(masks).squeeze(1)
+            pImages = procImages.clone()
             for idx in range(images.shape[0]) :
-                pytorch_amfill.ops.amfill_(procImages[idx,0,...], missingInBoth[idx])
-                pytorch_amfill.ops.amfill_(procImages[idx,1,...], missingInBoth[idx])
+                pytorch_amfill.ops.amfill_(pImages[idx,0,...], presentInBoth[idx,0,...])
+                pytorch_amfill.ops.amfill_(pImages[idx,1,...], presentInBoth[idx,0,...])
+            rImages = inverseElements(pImages)
+            procImages = torch.where( masks > 0 , procImages , procImages[:,[1,0],...] * pImages * rImages[:,[1,0],...] )
+            procImages -= 0.5
 
             noises = noises if noises is not None else None if not self.latentChannels else \
                 torch.randn( (images.shape[0], TCfg.latentDim) , device = TCfg.device)
@@ -868,7 +869,7 @@ class GeneratorTemplate(nn.Module):
         upTrain = [mid]
         for level, decoder in enumerate(self.decoders) :
             upTrain.append( decoder( torch.cat( (upTrain[-1], dwTrain[-1-level]), dim=1 ) ) )
-        res = images[:,[1,0],...] + self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
+        res = images + self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
         res = torch.where ( masks > 0 , images, res * masks[:,[1,0],...] )
         res = self.postProc(res, procInf) * missingMask(masks)
         saveToInterim('output', res)

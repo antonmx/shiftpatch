@@ -23,7 +23,7 @@ __global__ void amfill_kernel(const int  Xs, const int  Ys,
   }
 
   // find nearest unmasked
-  const int mcrad = max(Xs, Ys) / 2;
+  const int mcrad = floor(sqrt(Xs*Xs + Ys*Ys))-1;
   int crad=0; // negative crad indicates first nonmasked pixel
   while ( crad>=0 && crad < mcrad ) {
     crad++;
@@ -67,8 +67,7 @@ __global__ void amfill_kernel(const int  Xs, const int  Ys,
       gsumd += wght*im[idii];
     }
   }
-  if (mass>0.0)
-    om[idi] = gsumd / mass;
+  om[idi] = mass>0.0 ? gsumd / mass : 0;
 
 }
 
