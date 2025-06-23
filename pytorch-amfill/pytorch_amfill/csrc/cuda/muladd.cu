@@ -8,8 +8,8 @@
 namespace pytorch_amfill {
 
 
-__global__ void amfill_root(const int  Xs, const int  Ys, const int idi,
-                            const float* im, const bool* mask, float* om) {
+__device__ void amfill_root(const int  Xs, const int  Ys, const int idi,
+                 const float* im, const bool* mask, float* om) {
 
   //const int idi = blockIdx.x * blockDim.x + threadIdx.x;
   const int idx = idi % Xs;
@@ -86,19 +86,25 @@ __global__ void amfill_kernel_batch(const int Xs, const int Ys, const int Cs, co
                                     const float* im, const bool* mask, float* om) {
 
   const int idi = blockIdx.x * blockDim.x + threadIdx.x;
-  rest = idi;
-  const int idx = rest % Xs;
-  rest -= idx;
-  const int idy = rest % (Xs*Ys);
-  rest -= idy * Xs;
-  const int idc = rest % (Xs*Ys*Cs);
+  int rest = idi;
   const int idb = rest / (Xs*Ys*Cs);
+  rest -= idb * (Xs*Ys*Cs);
+  const int idc = rest / (Xs*Ys);
+  rest -= idc * (Xs*Ys);
+  const int idy = rest / Xs;
+  const int idx = rest - idy * Xs;
+  //const int idx = rest % Xs;
+  //rest -= idx;
+  //const int idy = rest % (Xs*Ys);
+  //rest -= idy * Xs;
+  //const int idc = rest % (Xs*Ys*Cs);
+  //const int idb = rest / (Xs*Ys*Cs);
   if ( idx >= Xs || idy >= Ys || idc >= Cs || idb >= Bs )
     return;
 
   const int iShift = idb * Xs*Ys*Cs + idc * Xs*Ys;
   const int fShift = min(idb,MBs-1) * Xs*Ys*MCs + min(idc,MCs-1) * Xs*Ys;
-  amfill_root(Xs, Ys, idx + idy * Xs , im+iShift, fmask+fShift, om+iShift);
+  amfill_root(Xs, Ys, idx + idy * Xs , im+iShift, mask+fShift, om+iShift);
 
 }
 
@@ -107,19 +113,22 @@ __global__ void amfill_kernel_batch(const int Xs, const int Ys, const int Cs, co
 at::Tensor amfill_cuda(const at::Tensor& im, const at::Tensor& mask) {
   const int dim = im.dim();
   TORCH_CHECK(dim <= 4 and dim >= 2);
-  const at::IntArrayRef imsizes({
-    dim == 4 ? im.sizes()[0] : 1 ,
-    dim >= 3 ? im.sizes()[dim-3] : 1 ,
+  const int imsizes[] = {
+    dim == 4 ? std::max<int>(1,im.sizes()[0]) : 1,
+    dim >= 3 ? std::max<int>(1,im.sizes()[dim-3]) : 1,
     im.sizes()[dim-2],
-    im.sizes()[dim-1],
-  });
+    im.sizes()[dim-1]
+  };
   const int mdim = mask.dim();
-  const at::IntArrayRef mssizes({
-    dim == 4 ? mask.sizes()[0] : 1 ,
-    dim >= 3 ? mask.sizes()[dim-3] : 1 ,
-    mask.sizes()[dim-2],
-    mask.sizes()[dim-1],
-  });
+  TORCH_CHECK(mdim <= 4 and mdim >= 2);
+  const int mssizes[] = {
+    mdim == 4 ? std::max<int>(1,mask.sizes()[0]) : 1 ,
+    mdim >= 3 ? std::max<int>(1,mask.sizes()[mdim-3]) : 1 ,
+    mask.sizes()[mdim-2],
+    mask.sizes()[mdim-1]
+  };
+  TORCH_CHECK(imsizes[0] == mssizes[0]  or  mssizes[0] == 1);
+  TORCH_CHECK(imsizes[1] == mssizes[1]  or  mssizes[1] == 1);
   TORCH_CHECK(imsizes[2] == mssizes[2]);
   TORCH_CHECK(imsizes[3] == mssizes[3]);
   TORCH_CHECK(im.dtype() == at::kFloat);
@@ -134,8 +143,8 @@ at::Tensor amfill_cuda(const at::Tensor& im, const at::Tensor& mask) {
   const bool* mask_ptr = mask_contig.data_ptr<bool>();
   float* om_ptr = om.data_ptr<float>();
   int numel = im_contig.numel();
-  amfill_kernel<<<(numel+255)/256, 256>>>(imsizes[3], imsizes[2], imsizes[1], imsizes[0],
-                                          mssizes[3], mssizes[2], im_ptr, mask_ptr, om_ptr);
+  amfill_kernel_batch<<<(numel+255)/256, 256>>>(imsizes[3], imsizes[2], imsizes[1], imsizes[0],
+                                          mssizes[1], mssizes[0], im_ptr, mask_ptr, om_ptr);
   return om;
 }
 
@@ -143,36 +152,39 @@ at::Tensor amfill_cuda(const at::Tensor& im, const at::Tensor& mask) {
 
 
 at::Tensor amfill_cuda_(at::Tensor& iom, const at::Tensor& mask) {
-  const int dim = im.dim();
+  const int dim = iom.dim();
   TORCH_CHECK(dim <= 4 and dim >= 2);
-  const at::IntArrayRef imsizes({
-    dim == 4 ? im.sizes()[0] : 1 ,
-    dim >= 3 ? im.sizes()[dim-3] : 1 ,
-    im.sizes()[dim-2],
-    im.sizes()[dim-1],
-  });
+  const int imsizes[] = {
+    dim == 4 ? std::max<int>(1,iom.sizes()[0]) : 1,
+    dim >= 3 ? std::max<int>(1,iom.sizes()[dim-3]) : 1,
+    iom.sizes()[dim-2],
+    iom.sizes()[dim-1],
+  };
   const int mdim = mask.dim();
-  const at::IntArrayRef mssizes({
-    dim == 4 ? mask.sizes()[0] : 1 ,
-    dim >= 3 ? mask.sizes()[dim-3] : 1 ,
-    mask.sizes()[dim-2],
-    mask.sizes()[dim-1],
-  });
+  TORCH_CHECK(mdim <= 4 and mdim >= 2);
+  const int mssizes[] = {
+    mdim == 4 ? std::max<int>(1,mask.sizes()[0]) : 1 ,
+    mdim >= 3 ? std::max<int>(1,mask.sizes()[mdim-3]) : 1 ,
+    mask.sizes()[mdim-2],
+    mask.sizes()[mdim-1],
+  };
+  TORCH_CHECK(imsizes[0] == mssizes[0]  or  mssizes[0] == 1);
+  TORCH_CHECK(imsizes[1] == mssizes[1]  or  mssizes[1] == 1);
   TORCH_CHECK(imsizes[2] == mssizes[2]);
   TORCH_CHECK(imsizes[3] == mssizes[3]);
-  TORCH_CHECK(im.dtype() == at::kFloat);
-  TORCH_CHECK(im.dtype() == at::kFloat);
+  TORCH_CHECK(iom.dtype() == at::kFloat);
+  TORCH_CHECK(iom.dtype() == at::kFloat);
   TORCH_CHECK(mask.dtype() == at::kBool);
-  TORCH_INTERNAL_ASSERT(im.device().type() == at::DeviceType::CUDA);
+  TORCH_INTERNAL_ASSERT(iom.device().type() == at::DeviceType::CUDA);
   TORCH_INTERNAL_ASSERT(mask.device().type() == at::DeviceType::CUDA);
-  at::Tensor im_contig = im.contiguous();
+  at::Tensor iom_contig = iom.contiguous();
   at::Tensor mask_contig = mask.contiguous();
-  const float* im_ptr = im_contig.data_ptr<float>();
+  float* iom_ptr = iom_contig.data_ptr<float>();
   const bool* mask_ptr = mask_contig.data_ptr<bool>();
-  int numel = im_contig.numel();
-  amfill_kernel<<<(numel+255)/256, 256>>>(imsizes[3], imsizes[2], imsizes[1], imsizes[0],
-                                          mssizes[3], mssizes[2], im_ptr, mask_ptr, iom_ptr);
-  return om;
+  int numel = iom_contig.numel();
+  amfill_kernel_batch<<<(numel+255)/256, 256>>>(imsizes[3], imsizes[2], imsizes[1], imsizes[0],
+                                          mssizes[1], mssizes[0], iom_ptr, mask_ptr, iom_ptr);
+  return iom;
 }
 
 

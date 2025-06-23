@@ -824,15 +824,11 @@ class GeneratorTemplate(nn.Module):
             emeans = ( (images*presentInBoth).sum(dim=(-1,-2)) * invSums ) [...,None,None]
             procImages = images * masks * inverseElements(emeans)
             pImages = procImages.clone()
-            for idx in range(images.shape[0]) :
-                pytorch_amfill.ops.amfill_(pImages[idx,0,...], presentInBoth[idx,0,...])
-                pytorch_amfill.ops.amfill_(pImages[idx,1,...], presentInBoth[idx,0,...])
+            pytorch_amfill.ops.amfill_(pImages, presentInBoth)
             rImages = inverseElements(pImages)
             procImages = torch.where( masks > 0 , procImages , procImages[:,[1,0],...] * pImages * rImages[:,[1,0],...] )
             missingInBoth = missingMask(masks)
-            for idx in range(images.shape[0]) :
-                pytorch_amfill.ops.amfill_(procImages[idx,0,...], missingInBoth[idx,0,...])
-                pytorch_amfill.ops.amfill_(procImages[idx,1,...], missingInBoth[idx,0,...])
+            pytorch_amfill.ops.amfill_(procImages, missingInBoth)
             procImages -= 1
 
             noises = noises if noises is not None else None if not self.latentChannels else \
