@@ -529,15 +529,16 @@ class ShiftedPair :
                       xdx:xdx+DCfg.inShape[-1]]
         shiftedRange = np.s_[ydx-yShift:ydx-yShift+DCfg.inShape[-2],
                              xdx-xShift:xdx-xShift+DCfg.inShape[-1]]
-        #orgSubMask = self.orgMask[range]
-        #sftSubMask = self.sftMask[shiftedRange]
+        orgSubMask = self.orgMask[range]
+        sftSubMask = self.sftMask[shiftedRange]
         subMask = self.orgMask[range] * self.sftMask[shiftedRange]
         orgTrainMask = samplingMask[hashOrg]
         sftTrainMask = samplingMask[hashSft]
+        missinInTrain = np.maximum(orgTrainMask, sftTrainMask) * subMask
         orgTrainVari = samplingVari[hashOrg]
         sftTrainVari = samplingVari[hashSft]
-        data = np.stack([ self.orgData[zdx, *range] * orgTrainVari * subMask,
-                          self.sftData[zdx, *shiftedRange] * sftTrainVari * subMask,
+        data = np.stack([ self.orgData[zdx, *range] * orgTrainVari * missinInTrain,
+                          self.sftData[zdx, *shiftedRange] * sftTrainVari * missinInTrain,
                           subMask * orgTrainMask, subMask * sftTrainMask,
                           #orgSubMask, sftSubMask
                         ])
@@ -722,11 +723,30 @@ def showMe(tSet, item=None) :
     image = image.to(TCfg.device)
 
 
-save_interim = None
-batchNormOpt = {}
+
+
+
+
+
+
+
+
 ##################################################
 #       GENERATOR
 ##################################################
+
+save_interim = None
+batchNormOpt = {}
+
+def normAndFillImages(images) :
+    fImages = pytorch_amfill.ops.amfill(images, images > 0)
+    sval, mval = torch.std_mean(fImages, dim=(-1,-2), keepdim=True)
+    return (fImages - mval) * inverseElements(sval) , sval, mval
+
+def denorm(images, sval, mval) :
+    return torch.addcmul(mval, images, sval)
+
+
 class GeneratorTemplate(nn.Module):
 
     def __init__(self, latentChannels=0, inputChannels = 4):
@@ -818,34 +838,26 @@ class GeneratorTemplate(nn.Module):
             if orgDims == 3 :
                 images = images.view(1, *images.shape)
             masks = images[:,2:4,...]
-            images = images[:,0:2,...]
+            images = images[:,0:2,...] * masks
+
             presentInBoth = ( masks[:,[0],...] * masks[:,[1],...] > 0 )
-            invSums = inverseElements( torch.count_nonzero(presentInBoth, dim=(-1,-2)) )
-            emeans = ( (images*presentInBoth).sum(dim=(-1,-2)) * invSums ) [...,None,None]
-            procImages = images * masks * inverseElements(emeans)
-            pImages = procImages.clone()
-            pytorch_amfill.ops.amfill_(pImages, presentInBoth)
+            pImages = pytorch_amfill.ops.amfill(images, presentInBoth)
             rImages = inverseElements(pImages)
-            procImages = torch.where( masks > 0 , procImages , procImages[:,[1,0],...] * pImages * rImages[:,[1,0],...] )
-            missingInBoth = missingMask(masks)
-            pytorch_amfill.ops.amfill_(procImages, missingInBoth)
-            procImages -= 1
+            procImages = torch.where( masks > 0 , images , images[:,[1,0],...] * pImages * rImages[:,[1,0],...] )
+            procImages, sval, mval = normAndFillImages(procImages)
 
             noises = noises if noises is not None else None if not self.latentChannels else \
                 torch.randn( (images.shape[0], TCfg.latentDim) , device = TCfg.device)
 
-        return (procImages, noises), (emeans, orgDims)
+        return (procImages, noises), (sval, mval, orgDims)
 
 
     def postProc(self, images, cfg):
-        emeans, orgDims = cfg
-        pimages = (images + 1) * emeans
-        #pimages0 = (images[:,0,...] + 0.5) * means
-        #pimages1 = (images[:,1,...] + 0.5) * means
-        #pimages = torch.stack((pimages0, pimages1), dim=1)
+        sval, mval, orgDims = cfg
+        pImages = denorm(images, sval, mval)
         if orgDims == 3 :
-            pimages = pimages.view(1, *images.shape)
-        return pimages
+            pImages = pImages.view(1, *images.shape)
+        return pImages
 
 
     def forward(self, input):
@@ -861,7 +873,7 @@ class GeneratorTemplate(nn.Module):
         input, procInf = self.preProc(input)
         images, noises = input
         saveToInterim('input', images)
-        return self.postProc(images, procInf) *  missingMask(masks)
+        #return self.postProc(images, procInf) *  missingMask(masks)
 
         dwTrain = [images,] if noises is None else [torch.cat((images, self.noise2latent(noises)), dim=1),]
         for encoder in self.encoders :
@@ -923,6 +935,7 @@ class DiscriminatorTemplate(nn.Module):
     def forward(self, images):
         if images.dim() == 3:
             images = images.unsqueeze(1)
+        images = normAndFillImages(images)[0]
         if not discriminatePair :
             images = images.reshape(-1, 1, *DCfg.inShape)
         convRes = self.body(images)
@@ -1532,7 +1545,7 @@ def train(savedCheckPoint):
                 refRes = testMe(refImages, plotMe=False)
                 rndIdx = random.randint(0,len(testSet)-1)
                 rndInp, rndIds = testSet.__getitem__(rndIdx)
-                rndRes = testMe(rndInp, plotMe=False)
+                rndRes = testMe(rndInp.clone(), plotMe=False)
 
                 imGap = 16
                 showMe = np.zeros( (2*DCfg.inShape[1] + imGap ,
@@ -1551,15 +1564,17 @@ def train(savedCheckPoint):
                             clmn * ( DCfg.inShape[0]+imGap) : (clmn+1) * DCfg.inShape[0] + clmn * imGap ] = \
                         imgToAdd.cpu().numpy()
                 addImage(0,0, rndRes[0][2,...])
-                addImage(1,0, rndRes[0][0,...]) #createTrimage(rndInp, 0))
-                addImage(2,0, refRes[0][0,2,...])
-                addImage(3,0, refRes[0][0,0,...])
-                addImage(4,0, refImages[0,0,...])
+                addImage(1,0, rndRes[0][0,...])
+                addImage(2,0, rndInp[0,...])
+                addImage(3,0, refRes[0][0,2,...])
+                addImage(4,0, refRes[0][0,0,...])
+                #addImage(4,0, refImages[0,0,...])
                 addImage(0,1, rndRes[0][3,...])
-                addImage(1,1, rndRes[0][1,...]) #createTrimage(rndInp, 1))
-                addImage(2,1, refRes[0][0,3,...])
-                addImage(3,1, refRes[0][0,1,...])
-                addImage(4,1, refImages[0,1,...])
+                addImage(1,1, rndRes[0][1,...])
+                addImage(2,1, rndInp[1,...])
+                addImage(3,1, refRes[0][0,3,...])
+                addImage(4,1, refRes[0][0,1,...])
+                #addImage(4,1, refImages[0,1,...])
 
                 updAcc *= (1/updAcc.counts) if updAcc.counts > 0 else 0
                 writer.add_scalars("Losses per iter",
@@ -1584,8 +1599,8 @@ def train(savedCheckPoint):
                 IPython.display.clear_output(wait=True)
                 beforeReport(locals())
                 print(f"Epoch: {epoch:3} ({minTestEpoch:3})." +
-                      f" (Train: {lastRec_train/normRec:.3f}/{minRecTrain/normRec:.3f}," +
-                      f" Test: {lastRec_test/normTestRec:.3f}/{minRecTest/normTestRec:.3f}).\n" +
+                      f" (Train: {lastRec_train/normRec:.3e}/{minRecTrain/normRec:.3e}," +
+                      f" Test: {lastRec_test/normTestRec:.3e}/{minRecTest/normTestRec:.3e}).\n" +
                       ( (f"{"Update.":<40s}" + \
                          f" L1L: {updAcc.lossL1L / normL1L :.3f} " +
                          f" MSE: {updAcc.lossMSE / normMSE :.3f} " ) \
