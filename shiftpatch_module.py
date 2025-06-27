@@ -532,16 +532,16 @@ class ShiftedPair :
         orgSubMask = self.orgMask[range]
         sftSubMask = self.sftMask[shiftedRange]
         subMask = self.orgMask[range] * self.sftMask[shiftedRange]
-        orgTrainMask = samplingMask[hashOrg]
-        sftTrainMask = samplingMask[hashSft]
-        missinInTrain = np.maximum(orgTrainMask, sftTrainMask) * subMask
+        orgTrainMask = samplingMask[hashOrg] * subMask
+        sftTrainMask = samplingMask[hashSft] * subMask
+        missinInTrain = np.maximum(orgTrainMask, sftTrainMask)
         orgTrainVari = samplingVari[hashOrg]
         sftTrainVari = samplingVari[hashSft]
-        data = np.stack([ self.orgData[zdx, *range] * orgTrainVari * missinInTrain,
-                          self.sftData[zdx, *shiftedRange] * sftTrainVari * missinInTrain,
-                          subMask * orgTrainMask, subMask * sftTrainMask,
-                          #orgSubMask, sftSubMask
-                        ])
+        inOrg = self.orgData[zdx, *range] * orgTrainVari * missinInTrain
+        inSft = self.sftData[zdx, *shiftedRange] * sftTrainVari * missinInTrain
+        if index is None  and bool(random.getrandbits(1)) : # random swap
+            inOrg, inSft = inSft, inOrg
+        data = np.stack([ inOrg, inSft, orgTrainMask, sftTrainMask])
         return data, (zdx, ydx, xdx)
 
 
