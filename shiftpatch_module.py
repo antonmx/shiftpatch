@@ -967,7 +967,7 @@ def adjustScheduler(scheduler, iniLr, target) :
     if gamma < 1 and curLR > target \
     or gamma > 1 and curLR < target :
         scheduler.step()
-    return f"LR : {curLR:.2e}. "
+    return f"LR : {scheduler.get_last_lr()[0]:.3e} ({curLR:.3f}). "
 
 
 def saveModels(path="") :
