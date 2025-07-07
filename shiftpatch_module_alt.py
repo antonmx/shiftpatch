@@ -529,18 +529,19 @@ class ShiftedPair :
                       xdx:xdx+DCfg.inShape[-1]]
         shiftedRange = np.s_[ydx-yShift:ydx-yShift+DCfg.inShape[-2],
                              xdx-xShift:xdx-xShift+DCfg.inShape[-1]]
-        #orgSubMask = self.orgMask[range]
-        #sftSubMask = self.sftMask[shiftedRange]
+        orgSubMask = self.orgMask[range]
+        sftSubMask = self.sftMask[shiftedRange]
         subMask = self.orgMask[range] * self.sftMask[shiftedRange]
-        orgTrainMask = samplingMask[hashOrg]
-        sftTrainMask = samplingMask[hashSft]
+        orgTrainMask = samplingMask[hashOrg] * subMask
+        sftTrainMask = samplingMask[hashSft] * subMask
+        missinInTrain = np.maximum(orgTrainMask, sftTrainMask)
         orgTrainVari = samplingVari[hashOrg]
         sftTrainVari = samplingVari[hashSft]
-        data = np.stack([ self.orgData[zdx, *range] * orgTrainVari * subMask,
-                          self.sftData[zdx, *shiftedRange] * sftTrainVari * subMask,
-                          subMask * orgTrainMask, subMask * sftTrainMask,
-                          #orgSubMask, sftSubMask
-                        ])
+        inOrg = self.orgData[zdx, *range] * orgTrainVari * missinInTrain
+        inSft = self.sftData[zdx, *shiftedRange] * sftTrainVari * missinInTrain
+        if index is None  and bool(random.getrandbits(1)) : # random swap
+            inOrg, inSft = inSft, inOrg
+        data = np.stack([ inOrg, inSft, orgTrainMask, sftTrainMask])
         return data, (zdx, ydx, xdx)
 
 
@@ -661,12 +662,6 @@ trainSet = initIfNew('trainSet')
 def createTestSet() :
     return createSet([ "01_dir", "01_flp"], False )
 testSet = initIfNew('testSet')
-examples = [
-    (1, 924, 315, 1583),
-    (1, 534, 733, 1302),
-    (1, 744, 23, 43),
-    (1, 772, 121, 1758)
-]
 
 
 def createSubSet(tSet, subSetSize=None) :
@@ -687,6 +682,13 @@ def createDataLoader(tSet, num_workers=os.cpu_count()) :
         drop_last=True
     )
 
+
+examples = [
+    (1, 924, 315, 1583),
+    (1, 534, 733, 1300),
+    (1, 744, 23, 44),
+    (1, 772, 121, 1758)
+]
 
 def createReferences(toShow = 0) :
     global examples
@@ -721,11 +723,33 @@ def showMe(tSet, item=None) :
     image = image.to(TCfg.device)
 
 
-save_interim = None
-batchNormOpt = {}
+
+
+
+
+
+
+
+
 ##################################################
 #       GENERATOR
 ##################################################
+
+save_interim = None
+batchNormOpt = {}
+
+def normAndFillImages(images) :
+    fImages = pytorch_amfill.ops.amfill(images, images > 0)
+    sval, mval = torch.std_mean(fImages, dim=(-1,-2), keepdim=True)
+    return (fImages - mval) * inverseElements(sval) , sval, mval
+
+def denorm(images, sval, mval) :
+    return torch.addcmul(mval, images, sval)
+
+def correctDelta(addition) :
+    return torch.abs(addition).sum()
+
+
 class GeneratorTemplate(nn.Module):
 
     def __init__(self, latentChannels=0, inputChannels = 4):
@@ -817,34 +841,26 @@ class GeneratorTemplate(nn.Module):
             if orgDims == 3 :
                 images = images.view(1, *images.shape)
             masks = images[:,2:4,...]
-            images = images[:,0:2,...]
+            images = images[:,0:2,...] * masks
+
             presentInBoth = ( masks[:,[0],...] * masks[:,[1],...] > 0 )
-            invSums = inverseElements( torch.count_nonzero(presentInBoth, dim=(-1,-2)) )
-            emeans = ( (images*presentInBoth).sum(dim=(-1,-2)) * invSums ) [...,None,None]
-            procImages = images * masks * inverseElements(emeans)
-            pImages = procImages.clone()
-            for idx in range(images.shape[0]) :
-                pytorch_amfill.ops.amfill_(pImages[idx,0,...], presentInBoth[idx,0,...])
-                pytorch_amfill.ops.amfill_(pImages[idx,1,...], presentInBoth[idx,0,...])
+            pImages = pytorch_amfill.ops.amfill(images, presentInBoth)
             rImages = inverseElements(pImages)
-            procImages = torch.where( masks > 0 , procImages , procImages[:,[1,0],...] * pImages * rImages[:,[1,0],...] )
-            procImages -= 0.5
+            procImages = torch.where( masks > 0 , images , images[:,[1,0],...] * pImages * rImages[:,[1,0],...] )
+            procImages, sval, mval = normAndFillImages(procImages)
 
             noises = noises if noises is not None else None if not self.latentChannels else \
                 torch.randn( (images.shape[0], TCfg.latentDim) , device = TCfg.device)
 
-        return (procImages, noises), (emeans, orgDims)
+        return (procImages, noises), (sval, mval, orgDims)
 
 
     def postProc(self, images, cfg):
-        emeans, orgDims = cfg
-        pimages = (images + 0.5) * emeans
-        #pimages0 = (images[:,0,...] + 0.5) * means
-        #pimages1 = (images[:,1,...] + 0.5) * means
-        #pimages = torch.stack((pimages0, pimages1), dim=1)
+        sval, mval, orgDims = cfg
+        pImages = denorm(images, sval, mval)
         if orgDims == 3 :
-            pimages = pimages.view(1, *images.shape)
-        return pimages
+            pImages = pImages.view(1, *images.shape)
+        return pImages
 
 
     def forward(self, input):
@@ -857,10 +873,11 @@ class GeneratorTemplate(nn.Module):
                 save_interim[key] = data.clone().detach()
 
         masks = input[0][:,2:4,...]
+        missingInBoth =  missingMask(masks)
         input, procInf = self.preProc(input)
         images, noises = input
         saveToInterim('input', images)
-        #return self.postProc(images[:,[1,0],...], procInf)
+        #return self.postProc(images, procInf) * missingInBoth
 
         dwTrain = [images,] if noises is None else [torch.cat((images, self.noise2latent(noises)), dim=1),]
         for encoder in self.encoders :
@@ -869,11 +886,12 @@ class GeneratorTemplate(nn.Module):
         upTrain = [mid]
         for level, decoder in enumerate(self.decoders) :
             upTrain.append( decoder( torch.cat( (upTrain[-1], dwTrain[-1-level]), dim=1 ) ) )
-        res = images + self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
+        addition = self.amplitude * self.lastTouch(torch.cat( (upTrain[-1], images ), dim=1 ))
+        res = images + addition
         res = torch.where ( masks > 0 , images, res * masks[:,[1,0],...] )
-        res = self.postProc(res, procInf) * missingMask(masks)
+        res = self.postProc(res, procInf) * missingInBoth
         saveToInterim('output', res)
-        return res
+        return res, correctDelta(addition * missingInBoth)
 
 
 generator = initIfNew('generator')
@@ -922,6 +940,7 @@ class DiscriminatorTemplate(nn.Module):
     def forward(self, images):
         if images.dim() == 3:
             images = images.unsqueeze(1)
+        images = normAndFillImages(images)[0]
         if not discriminatePair :
             images = images.reshape(-1, 1, *DCfg.inShape)
         convRes = self.body(images)
@@ -953,7 +972,7 @@ def adjustScheduler(scheduler, iniLr, target) :
     if gamma < 1 and curLR > target \
     or gamma > 1 and curLR < target :
         scheduler.step()
-    return f"LR : {curLR:.2e}. "
+    return f"LR : {scheduler.get_last_lr()[0]:.3e} ({curLR:.3f}). "
 
 
 def saveModels(path="") :
@@ -1056,16 +1075,19 @@ def loss_MSSSIM(p_true, p_pred, masks):
     dissimSum = (dissim*counts).sum() / counts.sum()
     return dissimSum
 
-SSIM_MSE = 1
-def loss_Rec(p_true, p_pred, masks):
-    lossSSIM = loss_MSSSIM(p_true, p_pred, masks) if SSIM_MSE > 0 else 0
-    lossMSE = loss_MSE(p_true, p_pred, masks) if SSIM_MSE < 1 else 0
-    loss = SSIM_MSE * lossSSIM + (1-SSIM_MSE) * lossMSE
-    return loss
+recSSIM = 0
+recMSE = 0
+recAdd = 1
+def loss_Rec(p_true, p_pred, addition, masks):
+    lossAdd = addition / pixelsCounted(masks).sum() if recAdd > 0 else 0
+    lossSSIM = loss_MSSSIM(p_true, p_pred, masks) if recSSIM > 0 else 0
+    lossMSE = loss_MSE(p_true, p_pred, masks) if recMSE < 1 else 0
+    loss = recAdd * lossAdd + recSSIM * lossSSIM + recMSE * lossMSE
+    return loss / (recAdd + recSSIM + recMSE)
 
-def loss_Gen(y_true, y_pred, p_true, p_pred, masks):
+def loss_Gen(y_true, y_pred, p_true, p_pred, addition, masks):
     lossAdv = loss_Adv(y_true, y_pred)
-    lossDif = loss_Rec(p_pred, p_true, masks)
+    lossDif = loss_Rec(p_true, p_pred, addition, masks)
     return lossAdv, lossDif
 
 ADV_DIF = 0
@@ -1106,9 +1128,11 @@ def summarizeSet(dataloader):
             rprobs = torch.zeros((nofIm, 1 if discriminatePair else 2), device=TCfg.device, requires_grad=False)
 
             masks = images[:,2:,...]
+            additionAcc = 0
             for i in range(TCfg.batchSplit) :
                 subRange = np.s_[i*subBatchSize:(i+1)*subBatchSize] if TCfg.batchSplit > 1 else np.s_[:]
-                fakeImages[subRange,...] = generator.forward((images[subRange,0:4,...],None))
+                fakeImages[subRange,...], addition = generator.forward((images[subRange,0:4,...],None))
+                additionAcc += addition
                 if not noAdv :
                     rprobs[subRange,...] = discriminator.forward(images[subRange,0:2,...])
                     fprobs[subRange,...] = discriminator.forward(fakeImages[subRange,...])
@@ -1116,13 +1140,13 @@ def summarizeSet(dataloader):
             totalPixels += pixelsCounted(masks).sum()
             MSE_diff += loss_MSE( images[:,0:2,...], fakeImages, masks ).item()
             L1L_diff += loss_L1L( images[:,0:2,...], fakeImages, masks ).item()
-            Rec_diff += loss_Rec( images[:,0:2,...], fakeImages, masks ).item()
+            Rec_diff += loss_Rec( images[:,0:2,...], fakeImages, addition, masks ).item()
             if not noAdv :
                 labelsTrue = torch.full_like(fprobs,  1 - TCfg.labelSmoothFac)
                 labelsFalse = torch.full_like(fprobs, TCfg.labelSmoothFac)
                 labelsDis = torch.cat( (labelsTrue, labelsFalse), dim=0).to(TCfg.device).requires_grad_(False)
                 subD_loss = loss_Adv(labelsDis, torch.cat((rprobs, fprobs), dim=0))
-                subGA_loss, subGD_loss = loss_Gen(labelsTrue, fprobs, images, fakeImages, masks)
+                subGA_loss, subGD_loss = loss_Gen(labelsTrue, fprobs, images, fakeImages, additionAcc, masks)
                 D_losses += subD_loss.sum().item()
                 GA_losses += subGA_loss.item()
                 GD_losses += subGD_loss.item()
@@ -1180,11 +1204,11 @@ def testMe(tSet, item=None, plotMe=True) :
         generator.train(testInTrain)
         discriminator.train(testInTrain)
         masks = images[:,2:,...]
-        generatedImages[:,0:2,...] = generator.forward( (images[:,0:4,...], None) )
+        generatedImages[:,0:2,...], addition = generator.forward( (images[:,0:4,...], None) )
         totalPixels = pixelsCounted(masks).sum()
-        MSE_diff , L1L_diff , Rec_diff = \
-            ( loss_func( images[:,0:2,...], generatedImages[:,0:2,...], masks ).item() \
-                    for loss_func in [loss_MSE, loss_L1L, loss_Rec ] )
+        MSE_diff = loss_MSE(images[:,0:2,...], generatedImages[:,0:2,...], masks)
+        L1L_diff = loss_L1L(images[:,0:2,...], generatedImages[:,0:2,...], masks)
+        Rec_diff = loss_Rec(images[:,0:2,...], generatedImages[:,0:2,...], addition, masks)
         if not noAdv :
             rprobs = discriminator.forward(images[:,0:2,...])
             fprobs = discriminator.forward(generatedImages[:,0:2,...])
@@ -1194,7 +1218,7 @@ def testMe(tSet, item=None, plotMe=True) :
             labelsFalse = torch.full_like(fprobs,  TCfg.labelSmoothFac)
             labelsDis = torch.cat( (labelsTrue, labelsFalse), dim=0).to(TCfg.device).requires_grad_(False)
             D_loss = loss_Adv(labelsDis, torch.cat((rprobs, fprobs), dim=0)).mean().item()
-            GA_loss, GD_loss = loss_Gen(labelsTrue, fprobs, images[:,0:2,...], generatedImages[:,0:2,...], masks)
+            GA_loss, GD_loss = loss_Gen(labelsTrue, fprobs, images[:,0:2,...], generatedImages[:,0:2,...], addition, masks)
         else :
             GA_loss = D_loss = 0.631
             GD_loss = Rec_diff
@@ -1370,6 +1394,7 @@ def train_step(images):
     labelsDis = torch.cat( (labelsTrue, labelsFalse), dim=0).to(TCfg.device).requires_grad_(False)
     discriminator.train()
     generator.train()
+    addition = 0
 
     # train discriminator
     for _ in range(0 if noAdv else trainCyclesDis) :
@@ -1381,8 +1406,9 @@ def train_step(images):
         for i in range(TCfg.batchSplit) :
             subRange = np.s_[i*subBatchSize:(i+1)*subBatchSize] if TCfg.batchSplit > 1 else np.s_[:]
             #with torch.no_grad() :
-            subFakeImages = generator.forward((images[subRange,0:4,...],None))
+            subFakeImages, subAddition = generator.forward((images[subRange,0:4,...],None))
             with torch.set_grad_enabled(not skipDis) :
+                addition += subAddition
                 subPred_realD = discriminator.forward(images[subRange,0:2,...])
                 subPred_fakeD = discriminator.forward(subFakeImages)
                 pred_both = torch.cat((subPred_realD, subPred_fakeD), dim=0)
@@ -1408,19 +1434,23 @@ def train_step(images):
     #discriminator.eval()
     for param in discriminator.parameters() :
         param.requires_grad = False
+    if trainCyclesGen :
+        addition = 0
     for _ in range(trainCyclesGen) :
         optimizer_G.zero_grad()
         for i in range(TCfg.batchSplit) :
             subRange = np.s_[i*subBatchSize:(i+1)*subBatchSize] if TCfg.batchSplit > 1 else np.s_[:]
             masks = images[subRange,2:,...]
-            subFakeImages = generator.forward((images[subRange,0:4,...],None))
+            subFakeImages, subAddition = generator.forward((images[subRange,0:4,...],None))
+            addition += subAddition
             if noAdv :
-                subG_loss = loss_Rec( images[subRange,0:2,...], subFakeImages, masks)
+                subG_loss = loss_Rec( images[subRange,0:2,...], subFakeImages, subAddition, masks)
                 subGA_loss = subGD_loss = subG_loss
             else :
                 subPred_fakeG = discriminator.forward(subFakeImages)
                 subGA_loss, subGD_loss = loss_Gen(labelsTrue, subPred_fakeG,
-                                                  images[subRange,0:2,...], subFakeImages, masks)
+                                                  images[subRange,0:2,...], subFakeImages,
+                                                  subAddition, masks)
                 subG_loss = combinedLoss(subGA_loss, subGD_loss)
                 pred_fake[subRange] = subPred_fakeG.clone().detach()
             subPred_realG = pred_real[subRange]
@@ -1446,7 +1476,7 @@ def train_step(images):
         trainRes.nofImages = nofIm
         trainRes.lossMSE = loss_MSE( images[:,0:2,...], fakeImages, masks ).item()
         trainRes.lossL1L = loss_L1L( images[:,0:2,...], fakeImages, masks ).item()
-        trainRes.lossRec = loss_Rec( images[:,0:2,...], fakeImages, masks ).item()
+        trainRes.lossRec = loss_Rec( images[:,0:2,...], fakeImages, addition, masks ).item()
         trainRes.counts = 1
 
 
@@ -1531,7 +1561,7 @@ def train(savedCheckPoint):
                 refRes = testMe(refImages, plotMe=False)
                 rndIdx = random.randint(0,len(testSet)-1)
                 rndInp, rndIds = testSet.__getitem__(rndIdx)
-                rndRes = testMe(rndInp, plotMe=False)
+                rndRes = testMe(rndInp.clone(), plotMe=False)
 
                 imGap = 16
                 showMe = np.zeros( (2*DCfg.inShape[1] + imGap ,
@@ -1550,15 +1580,17 @@ def train(savedCheckPoint):
                             clmn * ( DCfg.inShape[0]+imGap) : (clmn+1) * DCfg.inShape[0] + clmn * imGap ] = \
                         imgToAdd.cpu().numpy()
                 addImage(0,0, rndRes[0][2,...])
-                addImage(1,0, rndRes[0][0,...]) #createTrimage(rndInp, 0))
-                addImage(2,0, refRes[0][0,2,...])
-                addImage(3,0, refRes[0][0,0,...])
-                addImage(4,0, refImages[0,0,...])
+                addImage(1,0, rndRes[0][0,...])
+                addImage(2,0, rndInp[0,...])
+                addImage(3,0, refRes[0][0,2,...])
+                addImage(4,0, refRes[0][0,0,...])
+                #addImage(4,0, refImages[0,0,...])
                 addImage(0,1, rndRes[0][3,...])
-                addImage(1,1, rndRes[0][1,...]) #createTrimage(rndInp, 1))
-                addImage(2,1, refRes[0][0,3,...])
-                addImage(3,1, refRes[0][0,1,...])
-                addImage(4,1, refImages[0,1,...])
+                addImage(1,1, rndRes[0][1,...])
+                addImage(2,1, rndInp[1,...])
+                addImage(3,1, refRes[0][0,3,...])
+                addImage(4,1, refRes[0][0,1,...])
+                #addImage(4,1, refImages[0,1,...])
 
                 updAcc *= (1/updAcc.counts) if updAcc.counts > 0 else 0
                 writer.add_scalars("Losses per iter",
@@ -1583,8 +1615,8 @@ def train(savedCheckPoint):
                 IPython.display.clear_output(wait=True)
                 beforeReport(locals())
                 print(f"Epoch: {epoch:3} ({minTestEpoch:3})." +
-                      f" (Train: {lastRec_train/normRec:.3f}/{minRecTrain/normRec:.3f}," +
-                      f" Test: {lastRec_test/normTestRec:.3f}/{minRecTest/normTestRec:.3f}).\n" +
+                      f" (Train: {lastRec_train/normRec:.3e}/{minRecTrain/normRec:.3e}," +
+                      f" Test: {lastRec_test/normTestRec:.3e}/{minRecTest/normTestRec:.3e}).\n" +
                       ( (f"{"Update.":<40s}" + \
                          f" L1L: {updAcc.lossL1L / normL1L :.3f} " +
                          f" MSE: {updAcc.lossMSE / normMSE :.3f} " ) \
